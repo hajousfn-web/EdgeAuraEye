@@ -1,0 +1,1051 @@
+﻿<!DOCTYPE html>
+<html lang="en" dir="ltr" id="htmlRoot">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ego Dashboard</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    :root {
+      --bg: #050d14;
+      --panel: rgba(11,16,22,0.88);
+      --line: rgba(148,163,184,0.24);
+      --text: #edf7ff;
+      --muted: #b9cadb;
+      --green: #2ee59d;
+      --cyan: #00f0ff;
+      --lime: #a6ff00;
+      --blue: #38bdf8;
+      --red: #ef4444;
+      --amber: #fbbf24;
+      --shadow: rgba(0,240,255,0.18);
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; min-height: 100%; background: radial-gradient(circle at top left, rgba(56,189,248,0.12), transparent 25%), var(--bg);
+      color: var(--text); font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    }
+    body { padding: 18px; }
+    body.rtl { direction: rtl; }
+
+    .topbar {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 12px 16px; margin-bottom: 18px; border: 1px solid var(--line); border-radius: 12px;
+      background: rgba(11,16,22,0.88); box-shadow: 0 0 0 1px rgba(0,0,0,0.2);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; letter-spacing: 0.12em; }
+    .brand-dot {
+      width: 10px; height: 10px; border-radius: 999px; background: linear-gradient(135deg, var(--green), #9ef59d);
+      box-shadow: 0 0 14px rgba(34,197,94,0.8);
+    }
+    .topbar-actions { display: flex; align-items: center; gap: 12px; }
+    .lang-select {
+      appearance: none; background: rgba(15,23,42,0.9); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+      padding: 8px 12px; min-width: 180px; font-size: 14px;
+    }
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 999px;
+      border: 1px solid rgba(34,197,94,0.4); background: rgba(34,197,94,0.12); color: #bbf7d0; font-size: 12px; font-weight: 700;
+    }
+
+    .dashboard {
+      display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(300px, 1fr); gap: 20px;
+    }
+    .panel {
+      background: rgba(11,16,22,0.85); border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+    }
+    .panel-heading {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; color: var(--muted);
+    }
+    .video-shell {
+      position: relative; border-radius: 12px; overflow: hidden; min-height: 300px; border: 1px solid rgba(34,197,94,0.62);
+      background: #000; box-shadow: inset 0 0 20px rgba(0,0,0,0.55);
+    }
+    .video-shell::before, .video-shell::after {
+      content: ''; position: absolute; width: 22px; height: 22px; border: 2px solid var(--cyan); z-index: 2;
+    }
+    .video-shell::before { left: 12px; top: 12px; border-right: none; border-bottom: none; }
+    .video-shell::after { right: 12px; bottom: 12px; border-left: none; border-top: none; }
+    .video-shell img { display: block; width: 100%; height: 100%; min-height: 300px; object-fit: cover; background: #02070d; }
+
+    .mapHeader { margin-top: 18px; margin-bottom: 10px; color: var(--blue); font-weight: 700; }
+    .map-mode-bar { display: flex; gap: 8px; margin-bottom: 12px; }
+    .map-mode-btn {
+      flex: 1; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+      background: rgba(15,23,42,0.72); color: var(--muted); cursor: pointer; font-weight: 600;
+    }
+    .map-mode-btn.active {
+      background: rgba(56,189,248,0.14); border-color: rgba(56,189,248,0.45); color: var(--text);
+    }
+
+    .route-panel {
+      margin-bottom: 12px; padding: 12px; border-radius: 10px; border: 1px solid var(--line);
+      background: rgba(17,24,39,0.7);
+    }
+    #navTitle {
+      margin: 0 0 10px; font-weight: 700; color: #86efac; letter-spacing: 0.02em;
+    }
+    .route-grid { display: flex; gap: 10px; flex-wrap: wrap; }
+    .route-grid input {
+      flex: 1 1 200px; min-width: 160px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line);
+      background: rgba(15,23,42,0.82); color: var(--text);
+    }
+    .route-grid button {
+      border: none; border-radius: 8px; background: linear-gradient(135deg, #22c55e, #16a34a); color: #fff;
+      padding: 10px 14px; font-weight: 800; cursor: pointer;
+    }
+
+    #spatialMap {
+      width: 100%; height: 420px; border-radius: 12px; overflow: hidden; position: relative; border: 1px solid var(--line);
+      background: #06141d;
+    }
+    #spatialMap * { box-sizing: border-box; }
+    .leaflet-container { background: #06141d; }
+    .leaflet-control-attribution {
+      background: rgba(5, 13, 20, 0.68) !important;
+      border: 1px solid rgba(148, 163, 184, 0.18) !important;
+      border-radius: 8px !important;
+      color: rgba(191, 219, 254, 0.8) !important;
+      font-size: 10px !important;
+      line-height: 1.3 !important;
+      padding: 4px 7px !important;
+      backdrop-filter: blur(4px);
+    }
+    .leaflet-control-attribution a {
+      color: rgba(0, 240, 255, 0.85) !important;
+      text-decoration: none;
+    }
+    .leaflet-control-zoom { display: none !important; }
+
+    .zone-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; margin-top: 14px; }
+    .zone-card {
+      padding: 14px; text-align: center; cursor: pointer; border-radius: 8px; border: 1px solid var(--line);
+      background: rgba(255,255,255,0.02); color: var(--text); transition: 120ms ease;
+    }
+    .zone-card.active {
+      background: rgba(220,38,38,0.12); border-color: rgba(220,38,38,0.6); color: #fecaca;
+    }
+
+    .sidebar { display: flex; flex-direction: column; gap: 20px; }
+    .mode-row {
+      display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 10px;
+      border-radius: 10px; border: 1px solid var(--line); background: rgba(15,23,42,0.72);
+    }
+    .mode-toggle {
+      position: relative; width: 58px; height: 30px; border-radius: 999px; border: 1px solid rgba(56,189,248,0.45);
+      background: rgba(59,130,246,0.16); cursor: pointer; transition: 180ms ease;
+    }
+    .mode-toggle::after {
+      content: ''; position: absolute; width: 22px; height: 22px; top: 3px; left: 4px; border-radius: 50%;
+      background: linear-gradient(135deg, #38bdf8, #1d4ed8); transition: left 180ms ease;
+    }
+    .mode-toggle.active { background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.45); }
+    .mode-toggle.active::after { left: 30px; background: linear-gradient(135deg, #4ade80, #16a34a); }
+
+    .fsm-badge {
+      display: inline-flex; align-items: center; justify-content: center; min-width: 120px; padding: 8px 12px;
+      border-radius: 999px; font-size: 11px; letter-spacing: 0.08em; font-weight: 800; text-transform: uppercase;
+      border: 1px solid transparent;
+    }
+    .fsm-badge.idle { background: rgba(148,163,184,0.12); color: #e2e8f0; border-color: rgba(148,163,184,0.3); }
+    .fsm-badge.tracking { background: rgba(56,189,248,0.12); color: #bae6fd; border-color: rgba(56,189,248,0.35); }
+    .fsm-badge.hazard { background: rgba(220,38,38,0.12); color: #fecaca; border-color: rgba(220,38,38,0.52); box-shadow: 0 0 18px rgba(220, 38, 38, 0.18); }
+
+    .action-btn {
+      width: 100%; margin-top: 14px; padding: 12px 14px; border: none; border-radius: 8px;
+      background: linear-gradient(135deg, #0ea5e9, #0284c7); color: #fff; font-weight: 800; cursor: pointer;
+    }
+    .action-btn.danger { background: linear-gradient(135deg, #ef4444, #b91c1c); }
+
+    .lang-box {
+      margin-top: 14px; padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: rgba(15,23,42,0.72);
+    }
+    .lang-box textarea {
+      width: 100%; min-height: 90px; resize: vertical; padding: 10px; border: 1px solid var(--line);
+      border-radius: 8px; background: rgba(2,6,23,0.9); color: var(--text);
+    }
+    .result-box {
+      margin-top: 10px; padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(56,189,248,0.4);
+      background: rgba(14,165,233,0.08); color: var(--text);
+    }
+
+    .telemetry-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
+    .metric {
+      background: rgba(15,23,42,0.72); border: 1px solid var(--line); border-radius: 10px; padding: 12px 10px; min-height: 90px;
+    }
+    .metric label { display: block; color: var(--muted); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 8px; }
+    .metric strong { font-size: 1.05rem; }
+    .logs {
+      height: 180px; overflow-y: auto; border-radius: 10px; border: 1px solid var(--line); background: rgba(2,6,23,0.92);
+      color: #86efac; padding: 12px; font-family: Consolas, monospace; font-size: 12px;
+    }
+    .video-fullscreen-btn {
+      position: absolute; top: 12px; right: 12px; z-index: 3;
+      width: 34px; height: 34px; border: 1px solid rgba(148,163,184,0.3);
+      border-radius: 10px; background: rgba(5,13,20,0.66); color: var(--text);
+      font-size: 18px; line-height: 1; cursor: pointer; backdrop-filter: blur(4px);
+    }
+    .video-fullscreen-btn:hover { border-color: rgba(0,240,255,0.42); box-shadow: 0 0 14px rgba(0,240,255,0.18); }
+
+    @media (max-width: 980px) { .dashboard { grid-template-columns: 1fr; } .telemetry-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+    @media (max-width: 560px) { body { padding: 12px; } .topbar { flex-direction: column; align-items: stretch; } .topbar-actions { justify-content: space-between; } .telemetry-grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-dot"></span><span id="brandLabel"></span></div>
+    <div class="topbar-actions">
+      <select id="langSelect" class="lang-select" aria-label="Language selector">
+        <option value="ar">العربية</option>
+        <option value="en" selected>English</option>
+        <option value="zgh">ⵜⴰⵎⴰⵣⵉⵖⵜ</option>
+        <option value="fr">Français</option>
+        <option value="es">Español</option>
+        <option value="it">Italiano</option>
+        <option value="ru">Русский</option>
+        <option value="ko">한국어</option>
+        <option value="zh">中文</option>
+      </select>
+      <div id="systemStatus" class="status-pill"></div>
+    </div>
+  </header>
+
+  <main class="dashboard">
+    <section class="panel">
+      <div class="panel-heading">
+        <strong id="liveFeedLabel"></strong>
+        <span id="activeZone"></span>
+      </div>
+
+      <div class="video-shell" id="videoShell">
+        <button type="button" class="video-fullscreen-btn" id="videoFullscreenBtn" aria-label="Toggle fullscreen">⛶</button>
+        <img src="/video_feed" class="w-full h-full object-cover" alt="" />
+      </div>
+
+      <div class="mapHeader" id="mapHeading"></div>
+      <div class="map-mode-bar">
+        <button type="button" class="map-mode-btn active" id="btnLocalMap"></button>
+        <button type="button" class="map-mode-btn" id="btnGlobalMap"></button>
+      </div>
+
+      <div class="route-panel" id="routePanel">
+        <div id="navTitle"></div>
+        <div class="route-grid">
+          <input id="startLocation" type="text" />
+          <input id="endLocation" type="text" />
+          <button type="button" id="routeAction"></button>
+        </div>
+      </div>
+
+      <div id="spatialMap" aria-label="Spatial map"></div>
+
+      <div class="zone-grid">
+        <div class="zone-card active" data-zone="Zone A - Main Corridor" id="zoneA"></div>
+        <div class="zone-card" data-zone="Zone B - Loading Dock" id="zoneB"></div>
+        <div class="zone-card" data-zone="Zone C - Storage Warehouse" id="zoneC"></div>
+        <div class="zone-card" data-zone="Zone D - Assembly Line" id="zoneD"></div>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <section class="panel">
+        <h3 id="controlCenterLabel" style="margin:0 0 12px; color: var(--blue);"></h3>
+        <div class="mode-row">
+          <span id="modeLabel"></span>
+          <button id="modeToggle" class="mode-toggle" type="button" aria-label="Toggle mode"></button>
+        </div>
+        <div class="mode-row" style="margin-top: 12px; justify-content: space-between;">
+          <span id="fsmLabel">FSM</span>
+          <span id="fsmBadge" class="fsm-badge idle">IDLE</span>
+        </div>
+        <button type="button" id="toggleBtn" class="action-btn"></button>
+
+        <div class="lang-box">
+          <label id="languageInputLabel" for="languageInput" style="display:block; margin-bottom:8px; font-weight:700;"></label>
+          <textarea id="languageInput" placeholder=""></textarea>
+          <button type="button" id="detectBtn" class="action-btn" style="margin-top:10px;"></button>
+          <div id="languageResult" class="result-box"></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h3 id="telemetryLabel" style="margin:0 0 12px; color: var(--blue);"></h3>
+        <div class="telemetry-grid">
+          <div class="metric">
+            <label id="fpsLabel"></label>
+            <strong id="fpsMetric"></strong>
+          </div>
+          <div class="metric">
+            <label id="latencyLabel"></label>
+            <strong id="latencyMetric"></strong>
+          </div>
+          <div class="metric">
+            <label id="storageLabel"></label>
+            <strong id="storageMetric"></strong>
+          </div>
+        </div>
+        <h4 id="logHeader" style="margin: 14px 0 10px;"></h4>
+        <div id="logTerminal" class="logs"></div>
+      </section>
+    </aside>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const translations = {
+      ar: {
+        dir: 'rtl',
+        brand: 'إيجو',
+        ego: 'إيجو',
+        systemStatus: '● نشط محلياً',
+        liveFeed: 'البث المباشر للكاميرا',
+        mapHeading: 'مصفوفة المناطق الصناعية (تحديد الموقع المحلي)',
+        controlCenter: 'مركز التحكم',
+        telemetry: 'قياسات النظام والتشخيص',
+        logs: 'سجلات النظام',
+        operatorMode: 'وضع المشغل',
+        pedestrianMode: 'وضع المشاة',
+        startCapture: 'بدء رصد الخطر',
+        stopCapture: 'إيقاف رصد الخطر',
+        navTitle: '🤖 تنقل إيجو',
+        startPlaceholder: 'نقطة البداية (مثال: البوابة الرئيسية)',
+        endPlaceholder: 'المقصد (مثال: خط التجميع)',
+        routeAction: 'حساب المسار',
+        localMap: 'خريطة المصنع المحلية',
+        globalMap: 'خريطة الأسطول العالمية',
+        languageLabel: 'كاشف اللغة',
+        languagePlaceholder: 'اكتب نصاً بالعربية أو الإنجليزية أو الأمازيغية أو الفرنسية أو الإسبانية أو الإيطالية أو الروسية أو الكورية أو الصينية…',
+        detectLanguage: 'تحديد اللغة',
+        resultPrefix: 'اللغة المكتشفة:',
+        unknown: 'غير معروف',
+        zoneA: 'المنطقة أ (الرئيسية)',
+        zoneB: 'المنطقة ب (الشحن)',
+        zoneC: 'المنطقة ج (المستودع)',
+        zoneD: 'المنطقة د (التجميع)',
+        fps: 'إطار/ثانية',
+        latency: 'زمن الاستجابة',
+        storage: 'التخزين المحلي',
+        fsm: 'حالة نظام التحكم',
+        tracking: 'تتبع نشط',
+        idle: 'خامل / جاهز',
+        hazardActive: 'خطر نشط',
+        cameraFeed: 'البث المباشر للكاميرا',
+        activeText: '● نشط محلياً',
+        route: 'المسار',
+        battery: 'البطارية',
+        localActive: 'نشط محلياً',
+        shortFsm: 'حالة التحكم',
+        metrics: 'المقاييس'
+      },
+      en: {
+        dir: 'ltr',
+        brand: 'Ego',
+        ego: 'Ego',
+        systemStatus: '● Local Active',
+        liveFeed: 'Live camera feed',
+        mapHeading: 'Industrial Zones Matrix (Local Positioning)',
+        controlCenter: 'Control Center',
+        telemetry: 'Telemetry & Diagnostics',
+        logs: 'System Logs',
+        operatorMode: 'Operator Mode',
+        pedestrianMode: 'Pedestrian Mode',
+        startCapture: 'Start Hazard Capture',
+        stopCapture: 'Stop Hazard Capture',
+        navTitle: '🤖 Ego Navigation',
+        startPlaceholder: 'Start location (e.g. Main Gate)',
+        endPlaceholder: 'Destination (e.g. Assembly Line)',
+        routeAction: 'Route & Deconflict',
+        localMap: 'Local Factory Map',
+        globalMap: 'Global Fleet World Map',
+        languageLabel: 'Language Detector',
+        languagePlaceholder: 'Type Arabic, English, Amazigh, French, Spanish, Italian, Russian, Korean, or Chinese text here…',
+        detectLanguage: 'Detect Language',
+        resultPrefix: 'Detected Language:',
+        unknown: 'Unknown',
+        zoneA: 'Zone A (Main)',
+        zoneB: 'Zone B (Loading)',
+        zoneC: 'Zone C (Storage)',
+        zoneD: 'Zone D (Assembly)',
+        fps: 'FPS',
+        latency: 'Latency',
+        storage: 'Local Storage',
+        fsm: 'FSM Status',
+        tracking: 'TRACKING',
+        idle: 'IDLE',
+        hazardActive: 'HAZARD_ACTIVE',
+        cameraFeed: 'Live camera feed',
+        activeText: '● Local Active',
+        route: 'Route',
+        battery: 'Battery',
+        localActive: 'Local Active',
+        shortFsm: 'FSM',
+        metrics: 'Metrics'
+      },
+      zgh: {
+        dir: 'ltr',
+        brand: 'ⵉⴳⵓ',
+        ego: 'ⵉⴳⵓ',
+        systemStatus: '● ⴰⵔⴰ ⵉⵣⵔⴰⵏ',
+        liveFeed: 'ⴰⵙⴳⵓⵏ ⵏ ⵜⴽⴰⵎⵉⵔⴰ',
+        mapHeading: 'ⵎⴰⵟⵔⵉⵙ ⵏ ⵜⵣⴰⵏⵉⵏ ⵉⵏⴷⵓⵙⵜⵔⵉⴰⵍ (ⵜⵓⵣⵣⵓⵏⵏⵉⵏ ⵜⴰⵏⴰⵢⵏⵉⵡⵉⵏ)',
+        controlCenter: 'ⴰⵎⴰⵙⵙⵍⴰⵎ',
+        telemetry: 'ⵜⵉⵍⵎⵉⵜⵔⵉⵏ & ⴰⵙⵙⵎⴰⵍ',
+        logs: 'ⵉⵎⴰⵣⵏⴰⵏ',
+        operatorMode: 'ⴰⵙⵓⵏⵏⴰⵔ',
+        pedestrianMode: 'ⴰⵙⵓⵏⵏⴰⵔ ⵉⵎⴰⵔⵙ',
+        startCapture: 'ⴱⴷⴷⵉ ⵜⵓⵎⵉⵍⵉⴽⵜ',
+        stopCapture: 'ⵙⴰⵍⵍ ⵜⵓⵎⵉⵍⵉⵇⵜ',
+        navTitle: '🤖 ⵉⵏⴰⵖⴰⵣⵉ ⵏ ⵉⴳⵓ',
+        startPlaceholder: 'ⴰⵙⵉⵏⴰⵢ (ⵎⵙⵙ. ⴰⵣⵔⵠⵉ ⵏ ⴰⵍⵉ)',
+        endPlaceholder: 'ⴰⵢⴰⴹⵏ (ⵎⵙⵙ. ⵙⵓⵍⵉⴷⵉ ⵏ ⴰⵙⵔⵓⵔ)',
+        routeAction: 'ⵙⵉⵕⵉⵔⵉ ⵏ ⵉⵙⵎⴰⵏ',
+        localMap: 'ⵜⴰⵔⴰⵙⵜ ⵏ ⵉⵎⵥⵉⵏⵓⵏ',
+        globalMap: 'ⵜⴰⵔⴰⵙⵜ ⵏ ⵜⵎⴰⵍⵍⴰⵍⵜ',
+        languageLabel: 'ⴰⵙⴰⵏⵙⵉⵡ',
+        languagePlaceholder: 'ⵎⵉⵟ ⵏⵉⵏ ⵏ ⵍⵎⵍⴰⵍⴰⵢ, ⵏⵉⵏⴰⵣⵍ, ⵏⵉⵏⴰⵎⴰⵣⵉⵖⵜ, ⵏⵉⵏⴼⵔⴰⵏⵙⵉ, ⵏⵉⵏⵙⴱⴰⵏⵢⵓⵍ, ⵏⵉⵏⵉⵜⴰⵍⵢⴰⵏ, ⵏⵉⵏⵔⵓⵙⵉ, ⵏⵉⵏⴽⵓⵔⵢⴰⵏ, ⵏⵉⵏⵛⵉⵏⵄ...',
+        detectLanguage: 'ⴰⵙⴰⵏⵙⵉⵡ',
+        resultPrefix: 'ⵜⵓⵍⵍⴰⵏ ⵜⵉⵎⴰⵛⵢⴰⵜ:',
+        unknown: 'ⵉⵎⵎⵓⵔ',
+        zoneA: 'ⵣⵓⵏ ⴰ (ⴰⵙⵏⵉⵡ)',
+        zoneB: 'ⵣⵓⵏ ⴱ (ⴰⵙⵓⵓⵍ)',
+        zoneC: 'ⵣⵓⵏ ⵊ (ⴰⵎⵣⴰⵔ)',
+        zoneD: 'ⵣⵓⵏ ⴷ (ⵙⵓⵍⵉⴷⵉ)',
+        fps: 'ⵜⵉⴼⵔⵉⵎⵉⵏ/ⵜⴰⵙⵉⵏⵉⵜ',
+        latency: 'ⴰⵣ|ⵎⴰⵎ',
+        storage: 'ⴰⵙⵙⵏⵓⵍ',
+        fsm: 'ⵓⵏⴳⵔⴰⵡ',
+        tracking: 'ⴰⴹⴼⴼⵓⵕ',
+        idle: 'ⴰⵙⴳⴳⴰⵡ',
+        hazardActive: 'ⵉⵎⵉⵣⵉ ⵉⵎⴷⴷⵓⵔ',
+        cameraFeed: 'ⴰⵙⴳⵓⵏ ⵏ ⵜⴽⴰⵎⵉⵔⴰ',
+        activeText: '● ⴰⵔⴰ ⵉⵣⵔⴰⵏ',
+        route: 'ⵉⵙⵎⴰⵏ',
+        battery: 'ⴰⵍⵓⵎ',
+        localActive: 'ⴰⵔⴰ ⵉⵣⵔⴰⵏ',
+        shortFsm: 'ⵓⵏⴳⵔⴰⵡ',
+        metrics: 'ⵓⵕⵏⴰⵡ'
+      },
+      fr: {
+        dir: 'ltr',
+        brand: 'Égo',
+        ego: 'Égo',
+        systemStatus: '● Système actif',
+        liveFeed: 'Flux vidéo en direct',
+        mapHeading: 'Matrice des zones industrielles (positionnement local)',
+        controlCenter: 'Centre de contrôle',
+        telemetry: 'Télémétrie et diagnostics',
+        logs: 'Journaux système',
+        operatorMode: 'Mode opérateur',
+        pedestrianMode: 'Mode piéton',
+        startCapture: 'Démarrer la capture',
+        stopCapture: 'Arrêter la capture',
+        navTitle: '🤖 Navigation Égo',
+        startPlaceholder: 'Départ (ex. Porte principale)',
+        endPlaceholder: 'Destination (ex. Ligne d’assemblage)',
+        routeAction: 'Calculer l’itinéraire',
+        localMap: 'Carte locale de l’usine',
+        globalMap: 'Carte mondiale de la flotte',
+        languageLabel: 'Détecteur de langue',
+        languagePlaceholder: 'Saisissez du texte en arabe, anglais, amazigh, français, espagnol, italien, russe, coréen ou chinois…',
+        detectLanguage: 'Détecter la langue',
+        resultPrefix: 'Langue détectée :',
+        unknown: 'Inconnu',
+        zoneA: 'Zone A (principale)',
+        zoneB: 'Zone B (chargement)',
+        zoneC: 'Zone C (stockage)',
+        zoneD: 'Zone D (assemblage)',
+        fps: 'Images/s',
+        latency: 'Latence',
+        storage: 'Stockage local',
+        fsm: 'État du système',
+        tracking: 'Suivi Actif',
+        idle: 'Repos',
+        hazardActive: 'Danger Détecté',
+        cameraFeed: 'Flux vidéo en direct',
+        activeText: '● Système actif',
+        route: 'Itinéraire',
+        battery: 'Batterie',
+        localActive: 'Système actif',
+        shortFsm: 'FSM',
+        metrics: 'Métriques'
+      },
+      es: {
+        dir: 'ltr',
+        brand: 'Égo',
+        ego: 'Égo',
+        systemStatus: '● Sistema activo',
+        liveFeed: 'Flujo de cámara en vivo',
+        mapHeading: 'Matriz de zonas industriales (posicionamiento local)',
+        controlCenter: 'Centro de control',
+        telemetry: 'Telemetría y diagnóstico',
+        logs: 'Registros del sistema',
+        operatorMode: 'Modo operador',
+        pedestrianMode: 'Modo peatonal',
+        startCapture: 'Iniciar captura',
+        stopCapture: 'Detener captura',
+        navTitle: '🤖 Navegación Égo',
+        startPlaceholder: 'Inicio (ej. Puerta principal)',
+        endPlaceholder: 'Destino (ej. Línea de montaje)',
+        routeAction: 'Calcular ruta',
+        localMap: 'Mapa local de fábrica',
+        globalMap: 'Mapa mundial de la flota',
+        languageLabel: 'Detector de idioma',
+        languagePlaceholder: 'Escribe texto en árabe, inglés, amazigh, francés, español, italiano, ruso, coreano o chino…',
+        detectLanguage: 'Detectar idioma',
+        resultPrefix: 'Idioma detectado:',
+        unknown: 'Desconocido',
+        zoneA: 'Zona A (principal)',
+        zoneB: 'Zona B (carga)',
+        zoneC: 'Zona C (almacén)',
+        zoneD: 'Zona D (montaje)',
+        fps: 'Cuadros/s',
+        latency: 'Latencia',
+        storage: 'Almacenamiento local',
+        fsm: 'Estado del sistema',
+        tracking: 'Rastreo Activo',
+        idle: 'Inactivo',
+        hazardActive: 'Peligro Detectado',
+        cameraFeed: 'Flujo de cámara en vivo',
+        activeText: '● Sistema activo',
+        route: 'Ruta',
+        battery: 'Batería',
+        localActive: 'Sistema activo',
+        shortFsm: 'FSM',
+        metrics: 'Métricas'
+      },
+      it: {
+        dir: 'ltr',
+        brand: 'Ego',
+        ego: 'Ego',
+        systemStatus: '● Sistema attivo',
+        liveFeed: 'Flusso video in diretta',
+        mapHeading: 'Matrice delle zone industriali (posizionamento locale)',
+        controlCenter: 'Centro di controllo',
+        telemetry: 'Telemetria e diagnostica',
+        logs: 'Log di sistema',
+        operatorMode: 'Modalità operatore',
+        pedestrianMode: 'Modalità pedone',
+        startCapture: 'Avvia cattura',
+        stopCapture: 'Ferma cattura',
+        navTitle: '🤖 Navigazione Ego',
+        startPlaceholder: 'Partenza (es. Cancello principale)',
+        endPlaceholder: 'Destinazione (es. Linea di assemblaggio)',
+        routeAction: 'Calcola percorso',
+        localMap: 'Mappa locale dell’impianto',
+        globalMap: 'Mappa mondiale della flotta',
+        languageLabel: 'Rilevatore lingua',
+        languagePlaceholder: 'Inserisci testo in arabo, inglese, amazigh, francese, spagnolo, italiano, russo, coreano o cinese…',
+        detectLanguage: 'Rileva lingua',
+        resultPrefix: 'Lingua rilevata:',
+        unknown: 'Sconosciuta',
+        zoneA: 'Zona A (principale)',
+        zoneB: 'Zona B (carico)',
+        zoneC: 'Zona C (magazzino)',
+        zoneD: 'Zona D (assemblaggio)',
+        fps: 'Fotogrammi/s',
+        latency: 'Latenza',
+        storage: 'Archiviazione locale',
+        fsm: 'Stato del sistema',
+        tracking: 'Tracciamento Attivo',
+        idle: 'Inattivo',
+        hazardActive: 'Pericolo rilevato',
+        cameraFeed: 'Flusso video in diretta',
+        activeText: '● Sistema attivo',
+        route: 'Percorso',
+        battery: 'Batteria',
+        localActive: 'Sistema attivo',
+        shortFsm: 'FSM',
+        metrics: 'Metriche'
+      },
+      ru: {
+        dir: 'ltr',
+        brand: 'Эго',
+        ego: 'Эго',
+        systemStatus: '● Система активна',
+        liveFeed: 'Видео поток в реальном времени',
+        mapHeading: 'Матрица промышленных зон (локальная привязка)',
+        controlCenter: 'Центр управления',
+        telemetry: 'Телеметрия и диагностика',
+        logs: 'Журнал системы',
+        operatorMode: 'Режим оператора',
+        pedestrianMode: 'Режим пешехода',
+        startCapture: 'Запуск захвата',
+        stopCapture: 'Остановить захват',
+        navTitle: '🤖 Навигация Эго',
+        startPlaceholder: 'Начало маршрута (напр. Главные ворота)',
+        endPlaceholder: 'Пункт назначения (напр. Сборочная линия)',
+        routeAction: 'Построить маршрут',
+        localMap: 'Локальная карта завода',
+        globalMap: 'Глобальная карта флота',
+        languageLabel: 'Определение языка',
+        languagePlaceholder: 'Введите текст на арабском, английском, амазигском, французском, испанском, итальянском, русском, корейском или китайском…',
+        detectLanguage: 'Определить язык',
+        resultPrefix: 'Определённый язык:',
+        unknown: 'Неизвестно',
+        zoneA: 'Зона A (основная)',
+        zoneB: 'Зона B (погрузка)',
+        zoneC: 'Зона C (склад)',
+        zoneD: 'Зона D (сборка)',
+        fps: 'Кадров/сек',
+        latency: 'Задержка',
+        storage: 'Локальное хранилище',
+        fsm: 'Состояние системы',
+        tracking: 'Активное Отслеживание',
+        idle: 'Ожидание',
+        hazardActive: 'Опасность Обнаружена',
+        cameraFeed: 'Видео поток в реальном времени',
+        activeText: '● Система активна',
+        route: 'Маршрут',
+        battery: 'Батарея',
+        localActive: 'Система активна',
+        shortFsm: 'FSM',
+        metrics: 'Метрики'
+      },
+      ko: {
+        dir: 'ltr',
+        brand: '에고',
+        ego: '에고',
+        systemStatus: '● 활성 노드',
+        liveFeed: '실시간 카메라 영상',
+        mapHeading: '산업 구역 매트릭스 (로컬 포지셔닝)',
+        controlCenter: '제어 센터',
+        telemetry: '원격 측정 및 진단',
+        logs: '시스템 로그',
+        operatorMode: '운영자 모드',
+        pedestrianMode: '보행자 모드',
+        startCapture: '위험 캡처 시작',
+        stopCapture: '캡처 중지',
+        navTitle: '🤖 에고 네비게이션',
+        startPlaceholder: '시작 위치 (예: 메인 게이트)',
+        endPlaceholder: '목적지 (예: 조립 라인)',
+        routeAction: '경로 계산',
+        localMap: '로컬 공장 지도',
+        globalMap: '글로벌 함대 지도',
+        languageLabel: '언어 감지기',
+        languagePlaceholder: '아랍어, 영어, 아마지그어, 프랑스어, 스페인어, 이탈리아어, 러시아어, 한국어 또는 중국어 텍스트를 입력하세요…',
+        detectLanguage: '언어 감지',
+        resultPrefix: '감지된 언어:',
+        unknown: '알 수 없음',
+        zoneA: '구역 A (메인)',
+        zoneB: '구역 B (로딩)',
+        zoneC: '구역 C (저장)',
+        zoneD: '구역 D (조립)',
+        fps: '초당 프레임 수',
+        latency: '응답 시간',
+        storage: '로컬 저장소',
+        fsm: '시스템 상태',
+        tracking: '활성 추적',
+        idle: '대기',
+        hazardActive: '위험 감지',
+        cameraFeed: '실시간 카메라 영상',
+        activeText: '● 활성 노드',
+        route: '경로',
+        battery: '배터리',
+        localActive: '활성 노드',
+        shortFsm: 'FSM',
+        metrics: '지표'
+      },
+      zh: {
+        dir: 'ltr',
+        brand: '自我 (Ego)',
+        ego: '自我 (Ego)',
+        systemStatus: '● 运行中',
+        liveFeed: '实时摄像头视频',
+        mapHeading: '工业区域矩阵（本地定位）',
+        controlCenter: '控制中心',
+        telemetry: '遥测与诊断',
+        logs: '系统日志',
+        operatorMode: '操作员模式',
+        pedestrianMode: '行人模式',
+        startCapture: '启动风险捕获',
+        stopCapture: '停止捕获',
+        navTitle: '🤖 自我导航',
+        startPlaceholder: '起点（例如：主门）',
+        endPlaceholder: '终点（例如：装配线）',
+        routeAction: '规划路线',
+        localMap: '本地工厂地图',
+        globalMap: '全球车队地图',
+        languageLabel: '语言检测器',
+        languagePlaceholder: '输入阿拉伯语、英语、阿马齐格语、法语、西班牙语、意大利语、俄语、韩语或中文文本…',
+        detectLanguage: '检测语言',
+        resultPrefix: '检测语言：',
+        unknown: '未知',
+        zoneA: 'A 区（主区域）',
+        zoneB: 'B 区（装卸）',
+        zoneC: 'C 区（存储）',
+        zoneD: 'D 区（装配）',
+        fps: '每秒帧数',
+        latency: '响应延迟',
+        storage: '本地存储',
+        fsm: '系统状态',
+        tracking: '激活追踪',
+        idle: '空闲',
+        hazardActive: '危险检测',
+        cameraFeed: '实时摄像头视频',
+        activeText: '● 运行中',
+        route: '路线',
+        battery: '电池',
+        localActive: '运行中',
+        shortFsm: 'FSM',
+        metrics: '指标'
+      }
+    };
+
+    const appState = {
+      map: null,
+      selectedZone: 'Zone A - Main Corridor',
+      modeState: 'Operator',
+      capturing: false,
+      hazardMarker: null,
+      hazardRing: null,
+      pulseTimer: null,
+      telemetryTimer: null,
+      liveMarkers: {},
+      language: 'en'
+    };
+
+    function getText(lang) {
+      return translations[lang] || translations.en;
+    }
+
+    function setFsmBadge(state) {
+      const badge = document.getElementById('fsmBadge');
+      if (!badge) return;
+      const normalized = String(state || 'IDLE').toUpperCase();
+      badge.textContent = normalized === 'TRACKING' ? getText(appState.language).tracking : normalized === 'HAZARD_ACTIVE' ? getText(appState.language).hazardActive : getText(appState.language).idle;
+      badge.className = 'fsm-badge ' + (normalized === 'HAZARD_ACTIVE' ? 'hazard' : normalized === 'TRACKING' ? 'tracking' : 'idle');
+    }
+
+    function updateMapZoneText() {
+      const lang = appState.language;
+      const t = getText(lang);
+      const mapZoneText = {
+        'Zone A - Main Corridor': t.zoneA,
+        'Zone B - Loading Dock': t.zoneB,
+        'Zone C - Storage Warehouse': t.zoneC,
+        'Zone D - Assembly Line': t.zoneD
+      };
+      const zoneText = mapZoneText[appState.selectedZone] || appState.selectedZone;
+      document.getElementById('activeZone').textContent = zoneText;
+      document.querySelectorAll('.zone-card').forEach((card) => {
+        card.textContent = mapZoneText[card.dataset.zone] || card.dataset.zone;
+      });
+    }
+
+    function applyLanguage(lang) {
+      const safe = translations[lang] ? lang : 'en';
+      const t = getText(safe);
+      appState.language = safe;
+
+      const htmlRoot = document.getElementById('htmlRoot');
+      if (htmlRoot) {
+        htmlRoot.setAttribute('lang', safe);
+        htmlRoot.setAttribute('dir', t.dir || 'ltr');
+      }
+      document.body.classList.toggle('rtl', t.dir === 'rtl');
+      document.getElementById('langSelect').value = safe;
+
+      document.getElementById('brandLabel').textContent = t.brand;
+      document.getElementById('systemStatus').textContent = t.systemStatus;
+      document.getElementById('liveFeedLabel').textContent = t.liveFeed;
+      document.getElementById('mapHeading').textContent = t.mapHeading;
+      document.getElementById('controlCenterLabel').textContent = t.controlCenter;
+      document.getElementById('telemetryLabel').textContent = t.telemetry;
+      document.getElementById('logHeader').textContent = t.logs;
+      document.getElementById('fpsLabel').textContent = t.fps;
+      document.getElementById('latencyLabel').textContent = t.latency;
+      document.getElementById('storageLabel').textContent = t.storage;
+      document.getElementById('btnLocalMap').textContent = t.localMap;
+      document.getElementById('btnGlobalMap').textContent = t.globalMap;
+      document.getElementById('navTitle').textContent = t.navTitle;
+      document.getElementById('routeAction').textContent = t.routeAction;
+      document.getElementById('startLocation').placeholder = t.startPlaceholder;
+      document.getElementById('endLocation').placeholder = t.endPlaceholder;
+      document.getElementById('modeLabel').textContent = appState.modeState === 'Pedestrian' ? t.pedestrianMode : t.operatorMode;
+      document.getElementById('toggleBtn').textContent = appState.capturing ? t.stopCapture : t.startCapture;
+      document.getElementById('languageInputLabel').textContent = t.languageLabel;
+      document.getElementById('languageInput').placeholder = t.languagePlaceholder;
+      document.getElementById('detectBtn').textContent = t.detectLanguage;
+      document.getElementById('fsmLabel').textContent = t.fsm;
+      document.getElementById('languageResult').textContent = document.getElementById('languageResult').dataset.label ? `${t.resultPrefix} ${document.getElementById('languageResult').dataset.label}` : t.resultPrefix;
+      updateMapZoneText();
+    }
+
+    function initMap() {
+      if (appState.map) {
+        appState.map.remove();
+      }
+      const map = L.map('spatialMap', { attributionControl: true, zoomControl: false, zoomSnap: 0.25 });
+      map.setView([33.5892, -7.6038], 12);
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+        subdomains: 'abcd',
+        maxZoom: 20,
+        attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+      }).addTo(map);
+
+      const zoneShapes = {
+        'Zone A - Main Corridor': { coords: [[33.6065, -7.6400], [33.6025, -7.6290], [33.5943, -7.6365], [33.5982, -7.6470]], color: '#00f0ff' },
+        'Zone B - Loading Dock': { coords: [[33.5870, -7.6300], [33.5805, -7.6205], [33.5745, -7.6325], [33.5804, -7.6428]], color: '#a6ff00' },
+        'Zone C - Storage Warehouse': { coords: [[33.5785, -7.5970], [33.5722, -7.5870], [33.5658, -7.6000], [33.5718, -7.6128]], color: '#00f0ff' },
+        'Zone D - Assembly Line': { coords: [[33.5998, -7.5880], [33.5935, -7.5775], [33.5868, -7.5912], [33.5932, -7.6045]], color: '#a6ff00' }
+      };
+
+      Object.entries(zoneShapes).forEach(([name, config]) => {
+        const polygon = L.polygon(config.coords, {
+          color: config.color,
+          weight: 2,
+          fillColor: config.color,
+          fillOpacity: 0.12,
+          opacity: 0.95
+        }).addTo(map);
+        const center = L.latLngBounds(config.coords).getCenter();
+        const marker = L.marker(center, {
+          icon: L.divIcon({
+            className: 'zone-marker',
+            html: '<span style="display:block;width:16px;height:16px;border-radius:50%;background:' + config.color + ';box-shadow:0 0 14px rgba(0,240,255,.8);border:2px solid rgba(255,255,255,.8);"></span>',
+            iconSize: [16, 16],
+            iconAnchor: [8, 8],
+          })
+        }).addTo(map);
+        marker.bindPopup(name);
+        marker.on('click', () => selectZone(name));
+        polygon.on('click', () => selectZone(name));
+      });
+
+      L.circleMarker([33.5892, -7.6038], {
+        radius: 8,
+        color: '#00f0ff',
+        fillColor: '#00f0ff',
+        fillOpacity: 1,
+        weight: 2
+      }).addTo(map).bindPopup('Casablanca Hub');
+
+      appState.map = map;
+    }
+
+    function updateLiveMarker(positions) {
+      if (!appState.map) return;
+
+      const validPositions = Array.isArray(positions) ? positions.filter((device) => {
+        return device && Number.isFinite(Number(device.lat)) && Number.isFinite(Number(device.lon));
+      }) : [];
+
+      const nextDeviceIds = new Set();
+
+      validPositions.forEach((device) => {
+        const deviceId = device.device_id || 'android-device';
+        nextDeviceIds.add(deviceId);
+
+        const latLng = [Number(device.lat), Number(device.lon)];
+        let marker = appState.liveMarkers[deviceId];
+
+        if (!marker) {
+          marker = L.marker(latLng, {
+            icon: L.divIcon({
+              className: 'live-device-marker',
+              html: '<span style="display:block;width:16px;height:16px;border-radius:50%;background:#a6ff00;box-shadow:0 0 16px rgba(166,255,0,0.9);border:2px solid rgba(255,255,255,0.9);"></span>',
+              iconSize: [16, 16],
+              iconAnchor: [8, 8],
+            })
+          }).addTo(appState.map);
+          appState.liveMarkers[deviceId] = marker;
+        }
+
+        marker.setLatLng(latLng);
+        marker.bindPopup(`${deviceId}<br>Speed: ${Number(device.speed || 0).toFixed(1)} km/h<br>Distance: ${Number(device.distance || 0).toFixed(1)} m`);
+      });
+
+      Object.keys(appState.liveMarkers).forEach((deviceId) => {
+        if (!nextDeviceIds.has(deviceId)) {
+          appState.map.removeLayer(appState.liveMarkers[deviceId]);
+          delete appState.liveMarkers[deviceId];
+        }
+      });
+    }
+
+    function selectZone(zoneName) {
+      appState.selectedZone = zoneName;
+      updateMapZoneText();
+      document.querySelectorAll('.zone-card').forEach((card) => {
+        card.classList.toggle('active', card.dataset.zone === zoneName);
+      });
+    }
+
+    function renderHazard(coords) {
+      if (!appState.map) return;
+      if (appState.hazardMarker) appState.map.removeLayer(appState.hazardMarker);
+      if (appState.hazardRing) appState.map.removeLayer(appState.hazardRing);
+      if (appState.pulseTimer) clearInterval(appState.pulseTimer);
+
+      const point = Array.isArray(coords) && coords.length >= 2 ? coords : [33.5892, -7.6038];
+      appState.hazardMarker = L.circleMarker(point, {
+        radius: 12,
+        color: '#a6ff00',
+        fillColor: '#a6ff00',
+        fillOpacity: 1,
+        weight: 3
+      }).addTo(appState.map);
+
+      appState.hazardRing = L.circle(point, {
+        radius: 60,
+        color: '#a6ff00',
+        fillColor: '#a6ff00',
+        fillOpacity: 0.18,
+        weight: 2
+      }).addTo(appState.map);
+
+      let pulse = 1;
+      appState.pulseTimer = setInterval(() => {
+        if (!appState.hazardRing) return;
+        pulse = pulse > 0 ? 0 : 1;
+        appState.hazardRing.setStyle({ opacity: pulse ? 0.9 : 0.45, fillOpacity: pulse ? 0.18 : 0.09 });
+      }, 550);
+    }
+
+    function clearHazard() {
+      if (appState.hazardMarker && appState.map) appState.map.removeLayer(appState.hazardMarker);
+      if (appState.hazardRing && appState.map) appState.map.removeLayer(appState.hazardRing);
+      if (appState.pulseTimer) clearInterval(appState.pulseTimer);
+      appState.hazardMarker = null;
+      appState.hazardRing = null;
+      appState.pulseTimer = null;
+    }
+
+    function appendLog(message) {
+      const terminal = document.getElementById('logTerminal');
+      if (!terminal) return;
+      const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+      terminal.innerHTML += `[${now}] ${message}<br>`;
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    function toggleMode() {
+      appState.modeState = appState.modeState === 'Operator' ? 'Pedestrian' : 'Operator';
+      document.getElementById('modeToggle').classList.toggle('active', appState.modeState === 'Pedestrian');
+      document.getElementById('modeLabel').textContent = appState.modeState === 'Pedestrian' ? getText(appState.language).pedestrianMode : getText(appState.language).operatorMode;
+    }
+
+    async function toggleCapture() {
+      appState.capturing = !appState.capturing;
+      const button = document.getElementById('toggleBtn');
+      button.textContent = appState.capturing ? getText(appState.language).stopCapture : getText(appState.language).startCapture;
+      button.classList.toggle('danger', appState.capturing);
+      try {
+        const response = await fetch(`/api/toggle_capture?status=${appState.capturing}&zone=${encodeURIComponent(appState.selectedZone)}`);
+        if (response.ok) {
+          appendLog(`SYS: capture sync ok | zone=${appState.selectedZone} | active=${appState.capturing}`);
+        }
+      } catch (error) {
+        appendLog('SYS: local fallback mode active; backend unreachable');
+      }
+    }
+
+    async function detectLanguage() {
+      const input = document.getElementById('languageInput').value.trim();
+      const resultBox = document.getElementById('languageResult');
+      if (!input) {
+        resultBox.dataset.label = getText(appState.language).unknown;
+        resultBox.textContent = `${getText(appState.language).resultPrefix} ${getText(appState.language).unknown}`;
+        return;
+      }
+      try {
+        const response = await fetch('/api/detect-language', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: input })
+        });
+        const data = await response.json();
+        const detected = data.language_name || data.language || getText(appState.language).unknown;
+        resultBox.dataset.label = detected;
+        resultBox.textContent = `${getText(appState.language).resultPrefix} ${detected}`;
+        if (translations[data.language]) {
+          applyLanguage(data.language);
+        }
+      } catch (error) {
+        resultBox.dataset.label = getText(appState.language).unknown;
+        resultBox.textContent = `${getText(appState.language).resultPrefix} ${getText(appState.language).unknown}`;
+      }
+    }
+
+    function toggleVideoFullscreen() {
+      const videoShell = document.getElementById('videoShell');
+      if (!videoShell) return;
+      if (document.fullscreenElement === videoShell) {
+        document.exitFullscreen();
+      } else {
+        videoShell.requestFullscreen();
+      }
+    }
+
+    function pollTelemetry() {
+      fetch('/api/state')
+        .then((response) => response.json())
+        .then((payload) => {
+          const status = String(payload.status || 'IDLE').toUpperCase();
+          const fps = Number(payload.fps || 15);
+          const latency = Number(payload.edge_latency_ms ?? 8.4);
+          const storage = payload.storage_status || payload.db || 'Safe';
+
+          document.getElementById('fpsMetric').textContent = `${fps} FPS`;
+          document.getElementById('latencyMetric').textContent = `${latency.toFixed(1)} ms`;
+          document.getElementById('storageMetric').textContent = storage;
+          setFsmBadge(status);
+
+          if (status === 'HAZARD_ACTIVE') {
+            const coords = Array.isArray(payload.coordinates) && payload.coordinates.length >= 2 ? payload.coordinates : [33.5892, -7.6038];
+            renderHazard(coords);
+          } else {
+            clearHazard();
+          }
+
+          if (payload.active_zone) {
+            selectZone(payload.active_zone);
+          }
+
+          updateLiveMarker(Array.isArray(payload.live_positions) ? payload.live_positions : []);
+        })
+        .catch(() => {
+          setFsmBadge('IDLE');
+        });
+    }
+
+    document.getElementById('langSelect').addEventListener('change', function () {
+      applyLanguage(this.value);
+    });
+    document.getElementById('modeToggle').addEventListener('click', toggleMode);
+    document.getElementById('toggleBtn').addEventListener('click', toggleCapture);
+    document.getElementById('videoFullscreenBtn').addEventListener('click', toggleVideoFullscreen);
+    document.getElementById('detectBtn').addEventListener('click', detectLanguage);
+    document.getElementById('languageInput').addEventListener('input', detectLanguage);
+    document.getElementById('routeAction').addEventListener('click', function () {
+      const start = document.getElementById('startLocation').value || 'Main Gate';
+      const end = document.getElementById('endLocation').value || 'Assembly Line';
+      appendLog(`NAV: route request ${start} -> ${end}`);
+    });
+    document.querySelectorAll('.zone-card').forEach((card) => {
+      card.addEventListener('click', function () {
+        selectZone(this.dataset.zone);
+      });
+    });
+    document.getElementById('btnLocalMap').addEventListener('click', function () {
+      document.getElementById('routePanel').style.display = 'block';
+      document.querySelectorAll('.map-mode-btn').forEach((btn) => btn.classList.toggle('active', btn === this));
+    });
+    document.getElementById('btnGlobalMap').addEventListener('click', function () {
+      document.getElementById('routePanel').style.display = 'none';
+      document.querySelectorAll('.map-mode-btn').forEach((btn) => btn.classList.toggle('active', btn === this));
+    });
+
+    document.getElementById('languageInput').value = 'Hello, welcome to Ego.';
+    document.getElementById('languageResult').dataset.label = 'English';
+    document.getElementById('systemStatus').textContent = '● Local Active';
+    document.getElementById('logTerminal').innerHTML = '[10:30:00] SYSTEM: Local Spatial Node Booted.<br>[10:30:02] ENGINE: Vision pipeline online.';
+
+    applyLanguage('en');
+    initMap();
+    setFsmBadge('IDLE');
+    pollTelemetry();
+    setInterval(pollTelemetry, 1000);
+  </script>
+</body>
+</html>

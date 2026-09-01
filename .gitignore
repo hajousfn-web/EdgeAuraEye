@@ -1,0 +1,10 @@
+# Android
+build/
+.gradle/
+local.properties
+*.apk
+
+# Flutter
+flutter/build/
+.dart_tool/
+.flutter-plugin-dependencies
