@@ -1,107 +1,49 @@
-# Ego
+# Edge Aura Eye 🛡️👁️
 
-Ego is a local, offline-first industrial safety dashboard and spatial monitoring system. It combines a Flask-based web dashboard, live camera feed, local SQLite logging, and real-time telemetry tracking for Android devices and in-factory assets.
+> A production-grade, 100% offline-first tactical Edge AI dashcam and vision safety system designed for high-precision, zero-latency monitoring without cloud dependencies.
 
-## Overview
+---
 
-The project provides:
-- A live camera dashboard with industrial safety HUD styling
-- A map view for factory zones and live device position tracking
-- Local telemetry ingestion from Android clients
-- Offline-first storage and event logging
-- Multilingual UI support for several language variants
-- Hazard capture and active-zone awareness
+## 🚀 Overview
+**Edge Aura Eye** is an advanced local-first computer vision and driver/industrial safety system. Built with performance and data sovereignty in mind, it operates entirely on-device (`Zero-Cloud`), making it ideal for vehicular and industrial environments where privacy, reliability, and real-time responsiveness are critical.
 
-## Current capabilities
+## 🌟 Key Features
+* **100% Offline & Private (Zero-Cloud):** All video frames, inference, and telemetry data stay strictly on your local hardware via `LocalPrivacyGuard`.
+* **Dynamic Multilingual HUD:** Instant, full-UI runtime language switching supporting 9 languages (Arabic, English, Amazigh, French, Spanish, Russian, Korean, Chinese, Japanese).
+* **Moroccan Legal Safety Thresholds:** 
+  * 🟢 **Safe:** > 7.0 meters
+  * 🟡 **Warning:** 5.0 - 7.0 meters
+  * 🔴 **Critical Emergency:** <= 5.0 meters (triggers automated proactive pre-buffer recording).
+* **Non-Blocking SQLite Blackbox:** Multi-threaded architecture separating camera capture, AI inference, and database commits to maintain a high, stable FPS.
+* **Smart Auto-Reconnection:** Resilient camera worker handling disconnections gracefully without freezing the graphical user interface.
 
-- Flask web app serving the dashboard from `app.py`
-- Video feed from `/video_feed`
-- Local DB-backed alert logging via SQLite
-- Spatial zone telemetry and hazard state management
-- Live Android telemetry ingestion at `/api/telemetry`
-- Real-time active device list at `/api/live_positions`
-- Dashboard polling via `/api/state` every second
-- Moving map markers for active devices
-- Fullscreen video toggle in the dashboard UI
+## 🛠️ Tech Stack
+* **Language:** Python
+* **Computer Vision & AI:** OpenCV, Monocular distance estimation logic, YOLO-compatible inference adapters.
+* **GUI / HUD:** Modern Tkinter / CustomTkinter Tactical Dashboard.
+* **Data Storage:** SQLite3 (Local non-blocking background queue).
 
-## Project structure
-
-- `app.py` – main Flask backend and telemetry service
-- `templates/index.html` – dashboard UI, map, camera feed, and front-end logic
-- `language_utils.py` – language detection support
-- `app/` – Android project files and native app code
-- `flutter/` – Flutter integration and local dashboard components
-- `ego_database.db` – local SQLite database generated at runtime
-
-## Main routes
-
-- `/` – dashboard home page
-- `/video_feed` – MJPEG camera stream
-- `/api/state` – current system state and live device positions
-- `/api/live_positions` – active live telemetry devices after stale filtering
-- `/api/telemetry` – POST telemetry from Android clients
-- `/api/spatial_alert` – set/update hazard state
-- `/api/toggle_capture` – enable/disable capture mode
-- `/api/zones` – zone telemetry data
-
-## Telemetry payload format
-
-Android clients can send POST data like this:
-
-```json
-{
-  "device_id": "android-device-01",
-  "lat": 33.5892,
-  "lon": -7.6038,
-  "speed": 12.5,
-  "distance": 40.2
-}
+## 📋 Installation & Setup
+1. **Clone the repository:**
+   ```bash
+   git clone [https://github.com/hajousfn-web/EdgeAuraEye.git](https://github.com/hajousfn-web/EdgeAuraEye.git)
+   cd EdgeAuraEye
 ```
 
-Expected keys:
-- `device_id` (optional, defaults to `android-device`)
-- `lat` (required)
-- `lon` (required)
-- `speed` (optional)
-- `distance` (optional)
+1. **Install dependencies:**
 
-## Stale-device handling
+Bash
 
-The system keeps only fresh live positions for a short threshold window:
-- `STALE_THRESHOLD_SECONDS = 15`
+```
+pip install -r requirements.txt
+```
+2. **Run the application:**
 
-Any device older than this window is removed from the live positions registry and no longer shown on the map.
+Bash
 
-## Run locally
-
-1. Open a terminal in the project root.
-2. Install dependencies if needed.
-3. Start the Flask app:
-
-```bash
-python app.py
+```
+python edge_aura_camera_core.py
 ```
 
-Then open:
-
-```text
-http://localhost:5000/
-```
-
-## Notes
-
-- This is designed as an offline-first, local-only operational dashboard.
-- Camera access may fall back to a synthetic frame when no webcam is available.
-- Map tiles are configured for local dark industrial display and attribution remains visible in a subtle style.
-- The dashboard is suitable for edge-device or local workstation deployment.
-
-## Status
-
-Current project status is mixed:
-- local dashboard foundation is working
-- live stream, telemetry ingestion, state API, and map markers are active
-- warning/hazard logic and local persistence are in place
-- Android build has not been confirmed yet
-- JDK 17 has not been installed successfully on this machine yet, so Android native validation remains pending
-
-Next work should focus on completing the Android toolchain setup, verifying the build environment, and then continuing device synchronization and deployment cleanup.
+## 📜 License
+Distributed under the MIT License. See `LICENSE` for more information.
