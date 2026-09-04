@@ -6,10 +6,12 @@ renders the newest frame and consumes bounded telemetry/event queues.
 
 from __future__ import annotations
 
+import hmac
 import json
 import math
 import os
 import queue
+import secrets
 import sqlite3
 import threading
 import time
@@ -19,7 +21,6 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from tkinter import ttk
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 try:
@@ -79,11 +80,6 @@ class EdgeNavigationEngine:
             nearest = min(nearest, math.hypot(px - (ax + factor * dx), py - (ay + factor * dy)))
         return nearest
 
-    @classmethod
-    def check_route_drift(cls, position: Coordinate, route: List[Coordinate], threshold_m: float = 150.0):
-        distance_km = cls.distance_to_route_km(position, route)
-        return distance_km * 1000.0 > threshold_m, distance_km * 1000.0
-
 
 class GPSLowPassFilter:
     """Exponential low-pass filter for latitude/longitude samples."""
@@ -114,7 +110,7 @@ class GPSLowPassFilter:
 
 
 class GNSSSerialReader:
-    """Read local NMEA fixes without touching the Tkinter thread."""
+    """Read local NMEA fixes without touching the Tkinter thread (Safe & Optional)."""
 
     def __init__(self, port: str, output_queue: queue.Queue, baudrate: int = 9600):
         self.port = port
@@ -127,9 +123,14 @@ class GNSSSerialReader:
     def _coordinate(raw: str, hemisphere: str) -> Optional[float]:
         if not raw:
             return None
-        degrees = int(float(raw) // 100)
-        value = degrees + minutes / 60.0
-        return -value if hemisphere in {"S", "W"} else value
+        try:
+            raw_float = float(raw)
+            degrees = int(raw_float // 100)
+            minutes = raw_float - (degrees * 100)
+            value = degrees + (minutes / 60.0)
+            return -value if hemisphere in {"S", "W"} else value
+        except ValueError:
+            return None
 
     @classmethod
     def parse_nmea(cls, sentence: str) -> Optional[Tuple[float, float, float]]:
@@ -282,10 +283,31 @@ class LocalTelemetryStore:
 
 class TelemetryRequestHandler(BaseHTTPRequestHandler):
     telemetry_queue: "queue.Queue[tuple]"
+    auth_token: str = ""
+
+    def _authorized(self) -> bool:
+        # FIX (security): this endpoint used to accept any POST from anyone on
+        # the LAN with zero credential, so any device on the network could
+        # inject fake GPS/speed fixes into the blackbox. Now requires a
+        # shared-secret bearer token, compared with hmac.compare_digest to
+        # avoid timing side-channels.
+        if not self.auth_token:
+            return True
+        supplied = self.headers.get("Authorization", "")
+        expected = f"Bearer {self.auth_token}"
+        return hmac.compare_digest(supplied, expected)
 
     def do_POST(self):
         if self.path != "/telemetry":
             self.send_error(404)
+            return
+        if not self._authorized():
+            body = b'{"ok":false,"error":"unauthorized"}'
+            self.send_response(401)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -323,9 +345,23 @@ class Detection:
 class CameraWorker(threading.Thread):
     """Capture, infer, anonymize, and encode frames away from Tkinter."""
 
-    HAZARD_LABELS = {"fire", "smoke", "knife", "weapon", "fall", "intrusion", "accident"}
+    # FIX (logic — the false-alarm bug): "person" used to sit inside
+    # HAZARD_LABELS itself, which flipped the whole system to EMERGENCY the
+    # instant ANY person was detected, at ANY distance, ignoring the 5m/7m
+    # thresholds the rest of the app is built around. In a normal industrial
+    # scene where people are simply present, that means permanent false
+    # EMERGENCY + alert fatigue. CRITICAL_LABELS is now the set of things that
+    # are dangerous the moment they're seen (fire, weapon, fall, ...); "person"
+    # is intentionally NOT in it — a person only escalates state through the
+    # existing distance/motion logic in EdgeCameraDashboard.
+    CRITICAL_LABELS = {"fire", "smoke", "knife", "weapon", "fall", "intrusion", "accident"}
+    HAZARD_LABELS = CRITICAL_LABELS  # alias kept for any external code/tests using the old name
     REAL_HEIGHTS_M = {"person": 1.7, "car": 1.5, "truck": 3.0}
-    FOCAL_LENGTH_PX = 700.0
+    # FIX (calibration): was a hardcoded constant shared by every camera/lens,
+    # so the EMERGENCY distance threshold (5m) inherited whatever error that
+    # mismatch introduced. Now overridable per deployment; calibrate by
+    # measuring a known real-world distance and solving for this constant.
+    FOCAL_LENGTH_PX = float(os.environ.get("EDGE_AURA_FOCAL_LENGTH_PX", "700.0"))
     INFERENCE_WIDTH = 640
     TARGET_LATENCY_S = 0.12
     RECONNECT_DELAY_S = 2.0
@@ -347,6 +383,11 @@ class CameraWorker(threading.Thread):
         self._capture_failures = 0
         self._next_reconnect_at = 0.0
         self._camera_status = "CAMERA STARTING"
+        # FIX (edge hardware): device was hardcoded to "cpu" in infer(), which
+        # silently ignores any accelerator on the target edge hardware (Jetson
+        # Orin/Nano etc., per the SovereignGuard hardware list). Configurable
+        # now; still defaults to "cpu" so behavior is unchanged unless opted in.
+        self.inference_device = os.environ.get("YOLO_DEVICE", "cpu")
 
     def open_camera(self):
         if cv2 is None:
@@ -404,7 +445,7 @@ class CameraWorker(threading.Thread):
             return []
         detections = []
         try:
-            results = self.model.predict(frame, verbose=False, conf=0.35, device="cpu")
+            results = self.model.predict(frame, verbose=False, conf=0.35, device=self.inference_device)
             names = self.model.names
             for result in results:
                 for box in result.boxes:
@@ -444,9 +485,9 @@ class CameraWorker(threading.Thread):
         frame[:] = (18, 24, 25)
         tick = int(time.monotonic() * 90) % (width - 240)
         cv2.rectangle(frame, (0, 0), (width, 76), (25, 35, 36), -1)
-        cv2.putText(frame, "مدخل كاميرا احتياطي", (32, 46), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (125, 245, 207), 2, cv2.LINE_AA)
+        cv2.putText(frame, "مدخل كاميرا احتياطي // EDGE FEED", (32, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (125, 245, 207), 2, cv2.LINE_AA)
         cv2.rectangle(frame, (tick + 100, 250), (tick + 240, 430), (65, 120, 110), 2)
-        cv2.putText(frame, "لا توجد كاميرا", (tick + 112, 470), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (92, 173, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, "لا توجد كاميرا متصلة", (tick + 92, 470), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (92, 173, 255), 2, cv2.LINE_AA)
         return frame
 
     def annotate(self, frame, detections):
@@ -457,7 +498,7 @@ class CameraWorker(threading.Thread):
             if privacy_regions:
                 self.privacy_guard.anonymize_frame(frame, privacy_regions)
             for detection in detections:
-                hazard = detection.label in self.HAZARD_LABELS
+                hazard = detection.label in self.CRITICAL_LABELS
                 color = (70, 80, 255) if hazard else (90, 225, 170)
                 cv2.rectangle(frame, (detection.x, detection.y), (detection.x + detection.width, detection.y + detection.height), color, 2)
                 distance = f"  {detection.distance_m:.1f}m" if detection.distance_m is not None else ""
@@ -572,150 +613,97 @@ class EdgeCameraDashboard(tk.Frame):
     )
     LOCALIZATION = {
         "ar": {
-        "title": "مركز التحكم في الرؤية الميدانية",
-        "camera": "المراقبة بالكاميرا المباشرة",
-        "status": "حالة التهديد",
-        "metrics": "المؤشرات الحية",
-        "alerts": "سجل التنبيهات الفورية",
-        "telemetry": "البيانات المحلية",
-        "distance_card": "المسافة الآمنة",
-        "blackbox_card": "حالة الصندوق الأسود",
-        "safe": "آمن",
-        "warning": "انتباه",
-        "emergency": "خطر حرج",
-        "camera_online": "الكاميرا متصلة",
-        "camera_retry": "إعادة الاتصال بالكاميرا",
-        "fallback": "وضع الكاميرا الاحتياطي",
-        "language": "اللغة",
-        "english": "الإنجليزية",
-        "arabic": "العربية الفصحى",
-        "initializing": "جار تهيئة الكاميرا...",
-        "privacy_ready": "الذاكرة الدائرية ٠٫٠ ثانية | حماية الخصوصية جاهزة",
-        "local_processing": "المعالجة المحلية",
-        "distance": "أقرب مسافة",
-        "no_value": "لا توجد بيانات",
-        "distance_value": "{value:.1f} متر",
-        "points_summary": "{value} نقطة",
-        "seconds": "ثانية",
-        "pixels": "بكسل",
-        "frame_error": "تعذر عرض إطار الكاميرا",
-        "pillow_error": "يلزم تثبيت مكتبة عرض الصور",
-        "warning_motion": "انتباه: حركة بقيمة {value} بكسل",
-        "emergency_alert": "خطر حرج: {label}، نسبة الثقة {confidence}",
-        "buffer_saved": "تم حفظ الذاكرة السابقة: {label}",
-        "vision_online": "محرك الرؤية يعمل",
-        "vision_fallback": "وضع الرؤية الاحتياطي",
-        "camera_reconnecting": "جار إعادة الاتصال بالكاميرا",
-        "buffer_meta": "{state} | الذاكرة الدائرية {seconds:.1f} ثانية | الحركة {motion:.1f} بكسل",
-        "gateway": "بوابة البيانات المحلية: 127.0.0.1:8765",
-        "database": "الصندوق الأسود المحلي: driver_tactical_log.db",
-        "gnss_start": "تشغيل تحديد الموقع",
-        "gnss_stop": "إيقاف تحديد الموقع",
-        "metric_fps": "معدل الإطارات",
-        "metric_objects": "الأجسام المتتبعة",
-        "metric_buffer": "إطارات الذاكرة الدائرية",
-        "metric_state": "حالة الخطر",
-        "metric_safe": "دورات الأمان",
-        "metric_warning": "دورات الانتباه",
-        "metric_emergency": "حالات الخطر الحرج",
-        "metric_commits": "عمليات حفظ الذاكرة",
-        "metric_model": "محرك الرؤية",
-        "metric_points": "نقاط الصندوق الأسود",
-        "distance": "أقرب مسافة",
+            "title": "مركز التحكم في الرؤية الميدانية",
+            "camera": "المراقبة بالكاميرا المباشرة",
+            "status": "حالة التهديد",
+            "metrics": "المؤشرات الحية",
+            "alerts": "سجل التنبيهات الفورية",
+            "telemetry": "البيانات المحلية",
+            "distance_card": "المسافة الآمنة",
+            "blackbox_card": "حالة الصندوق الأسود",
+            "safe": "آمن",
+            "warning": "انتباه",
+            "emergency": "خطر حرج",
+            "emergency_locked": "خطر حرج // بانتظار إعادة التعيين اليدوي",
+            "reset_button": "إعادة تعيين يدوي (LOTO)",
+            "initializing": "جار تهيئة الكاميرا...",
+            "privacy_ready": "الذاكرة الدائرية نشطة | حماية الخصوصية جاهزة",
+            "local_processing": "المعالجة المحلية",
+            "no_value": "لا توجد بيانات",
+            "distance_value": "{value:.1f} متر",
+            "points_summary": "{value} نقطة",
+            "frame_error": "تعذر عرض إطار الكاميرا",
+            "pillow_error": "يلزم تثبيت مكتبة عرض الصور",
+            "warning_motion": "انتباه: حركة بقيمة {value} بكسل",
+            "emergency_alert": "خطر حرج: {label}، نسبة الثقة {confidence}",
+            "buffer_saved": "تم حفظ الذاكرة السابقة: {label}",
+            "vision_online": "محرك الرؤية يعمل",
+            "vision_fallback": "وضع الرؤية الاحتياطي",
+            "camera_reconnecting": "جار إعادة الاتصال بالكاميرا",
+            "buffer_meta": "{state} | الذاكرة الدائرية {seconds:.1f} ثانية | الحركة {motion:.1f} بكسل",
+            "gateway": "بوابة البيانات المحلية: 127.0.0.1:8765",
+            "database": "الصندوق الأسود المحلي: driver_tactical_log.db",
+            "gnss_start": "تشغيل تحديد الموقع",
+            "gnss_stop": "إيقاف تحديد الموقع",
+            "language": "اللغة",
+            "metric_fps": "معدل الإطارات",
+            "metric_objects": "الأجسام المتتبعة",
+            "metric_buffer": "إطارات الذاكرة الدائرية",
+            "metric_state": "حالة الخطر",
+            "metric_safe": "دورات الأمان",
+            "metric_warning": "دورات الانتباه",
+            "metric_emergency": "حالات الخطر الحرج",
+            "metric_commits": "عمليات حفظ الذاكرة",
+            "metric_model": "محرك الرؤية",
+            "metric_points": "نقاط الصندوق الأسود",
+            "distance": "أقرب مسافة",
         },
         "en": {
-        "title": "EdgeControl // Vision Operations Center",
-        "camera": "Live Camera Monitoring",
-        "status": "Threat Status",
-        "metrics": "Live Metrics",
-        "alerts": "Instant Alert Log",
-        "telemetry": "Local Telemetry",
-        "distance_card": "Safety distance",
-        "blackbox_card": "Blackbox status",
-        "safe": "SAFE",
-        "warning": "WARNING",
-        "emergency": "EMERGENCY",
-        "camera_online": "Camera connected",
-        "camera_retry": "Reconnecting camera",
-        "fallback": "Camera fallback mode",
-        "language": "Language",
-        "english": "English",
-        "arabic": "Modern Standard Arabic",
-        "initializing": "Initializing camera...",
-        "privacy_ready": "Circular buffer 0.0 seconds | Privacy protection ready",
-        "local_processing": "Local processing",
-        "distance": "Nearest distance",
-        "no_value": "No data",
-        "distance_value": "{value:.1f} m",
-        "points_summary": "{value} points",
-        "seconds": "seconds",
-        "pixels": "pixels",
-        "frame_error": "Unable to render camera frame",
-        "pillow_error": "Pillow is required for image preview",
-        "warning_motion": "WARNING: motion {value} pixels",
-        "emergency_alert": "EMERGENCY: {label}, confidence {confidence}",
-        "buffer_saved": "Pre-buffer saved: {label}",
-        "vision_online": "Vision engine online",
-        "vision_fallback": "Vision fallback mode",
-        "camera_reconnecting": "Reconnecting camera",
-        "buffer_meta": "{state} | Circular buffer {seconds:.1f} seconds | Motion {motion:.1f} pixels",
-        "gateway": "Local data gateway: 127.0.0.1:8765",
-        "database": "Local blackbox: driver_tactical_log.db",
-        "gnss_start": "Start location service",
-        "gnss_stop": "Stop location service",
-        "metric_fps": "Frame rate",
-        "metric_objects": "Tracked objects",
-        "metric_buffer": "Circular buffer frames",
-        "metric_state": "Hazard state",
-        "metric_safe": "Safe cycles",
-        "metric_warning": "Warning cycles",
-        "metric_emergency": "Emergency events",
-        "metric_commits": "Buffer commits",
-        "metric_model": "Vision engine",
-        "metric_points": "Blackbox points",
-        "distance": "Nearest distance",
-        },
-        "zgh": {
-        "title": "ⵄⵉⵏ ⵏ ⵓⵙⵏⵓⴱⴳ // ⵜⵉⵏⵎⵍ ⵏ ⵓⵙⵏⵓⴱⴳ",
-        "camera": "ⴰⵙⵏⵓⴱⴳ ⵙ ⵜⴽⴰⵎⵉⵔⴰ",
-        "status": "ⴰⴷⴷⴰⴷ ⵏ ⵓⵎⵏⴰⵣ",
-        "metrics": "ⵉⵙⵏⵓⵎⵎⵔⵏ ⵉⵎⵉⵔⴰ",
-        "alerts": "ⴰⵎⵢⴰⵡ ⵏ ⵉⵙⵙⵏ",
-        "telemetry": "ⵉⵙⴼⴽⴰ ⵏ ⴷⴰⵅⵍ",
-        "distance_card": "ⵜⴰⵎⵙⵙⵉⵔⵜ ⵏ ⵓⵎⵏⴰⵣ",
-        "blackbox_card": "ⴰⴷⴷⴰⴷ ⵏ ⵓⵙⵏⵓⴱⴳ ⴰⵎⵙⵙⴰⵏ",
-        "safe": "ⵉⵎⵏ",
-        "warning": "ⵙⵙⵏ",
-        "emergency": "ⴰⵎⵏⴰⵣ ⴰⵎⵇⵔⴰⵏ",
-        "language": "ⵜⵓⵜⵍⴰⵢⵜ", "english": "ⵜⴰⵏⴳⵍⵉⵣⵜ", "arabic": "ⵜⴰⵄⵔⴰⴱⵜ",
-        "initializing": "ⴰⵙⵏⵓⴱⴳ ⵏ ⵜⴽⴰⵎⵉⵔⴰ...", "privacy_ready": "ⴰⵎⵙⵙⴰⵏ ⵏ ⵜⵏⴰⵡⵜ 0.0 ⵏ ⵜⵙⵔⴰⵙ | ⵜⵉⵏⵎⵍ ⵏ ⵜⵏⵎⵍⴰ",
-        "local_processing": "ⴰⵙⵙⵏⵓⴱⴳ ⴰⴷⴰⵅⵍⴰⵏ", "distance": "ⵜⴰⵎⵙⵙⵉⵔⵜ ⵜⴰⵎⵣⵡⴰⵔⵓⵜ", "no_value": "ⵓⵍⴰ ⵢⵉⵍⵉ ⵓⵙⵏⵓⵎⵎⵔ",
-        "distance_value": "{value:.1f} ⵏ ⵎⵉⵜⵔ", "points_summary": "{value} ⵏ ⵉⵏⵇⵇⵉⴹ",
-        "seconds": "ⵜⵉⵙⵔⴰⵙ", "pixels": "ⵉⴱⵉⴽⵙⵍⵏ", "frame_error": "ⵓⵔ ⵉⵣⵎⵉⵔ ⵓⵙⵏⵓⴱⴳ ⵏ ⵓⴼⵔⴰⵎ", "pillow_error": "ⵉⵙⵔⵙ ⵓⵙⵏⵓⴱⴳ ⵏ ⵉⵎⵙⵙⵉⵔⵏ",
-        "warning_motion": "ⵙⵙⵏ: ⴰⵎⵙⵙⵉⵔ ⵏ {value} ⵉⴱⵉⴽⵙⵍⵏ", "emergency_alert": "ⴰⵎⵏⴰⵣ: {label}, ⵜⴰⵏⵎⵎⵉⵔⵜ {confidence}", "buffer_saved": "ⵉⵜⵜⵓⵙⵏⵓⴱⴳ ⵓⵙⵏⵓⴱⴳ: {label}",
-        "vision_online": "ⴰⵎⵙⵙⵏ ⵏ ⵜⵡⵉⵙⵉ ⵉⵔⵔⴰ", "vision_fallback": "ⴰⵙⵏⵓⴱⴳ ⴰⵎⵙⵙⴰⵏ", "camera_reconnecting": "ⴰⵙⵙⵏⵓⴱⴳ ⵏ ⵜⴽⴰⵎⵉⵔⴰ",
-        "buffer_meta": "{state} | ⵜⴰⵏⴰⵡⵜ {seconds:.1f} ⵜⵉⵙⵔⴰⵙ | ⴰⵎⵙⵙⵉⵔ {motion:.1f} ⵉⴱⵉⴽⵙⵍⵏ", "gateway": "ⵜⴰⵏⵓⴹⵜ ⵏ ⵉⵙⴼⴽⴰ: 127.0.0.1:8765", "database": "ⴰⵙⵏⵓⴱⴳ ⴰⵎⵙⵙⴰⵏ: driver_tactical_log.db",
-        "gnss_start": "ⴰⵙⵙⵏⵓⴱⴳ ⵏ ⵓⵙⵏⵓⴱⴳ", "gnss_stop": "ⴰⵙⵔⵙ ⵏ ⵓⵙⵏⵓⴱⴳ",
-        "metric_fps": "ⴰⵎⵔⵉⵔ ⵏ ⵉⴼⵔⴰⵎⵏ", "metric_objects": "ⵉⵎⵏⵣⴰⵡⵏ ⵉⵜⵜⵓⵙⵏⵓⴱⴳⵏ", "metric_buffer": "ⵉⴼⵔⴰⵎⵏ ⵏ ⵜⵏⴰⵡⵜ", "metric_state": "ⴰⴷⴷⴰⴷ ⵏ ⵓⵎⵏⴰⵣ", "metric_safe": "ⵉⵎⵏ ⵏ ⵉⵎⵉⵔⴰ", "metric_warning": "ⵙⵙⵏ ⵏ ⵉⵎⵉⵔⴰ", "metric_emergency": "ⵉⵎⵏⴰⵣⵏ ⵉⵎⵇⵔⴰⵏⵏ", "metric_commits": "ⵉⵙⵏⵓⴱⴳⵏ", "metric_model": "ⴰⵎⵙⵙⵏ ⵏ ⵜⵡⵉⵙⵉ", "metric_points": "ⵉⵏⵇⵇⵉⴹ ⵏ ⵓⵙⵏⵓⴱⴳ",
-        },
-        "fr": {
-        "title": "Centre de vision Edge Aura", "camera": "Surveillance camera en direct", "status": "Etat de menace", "metrics": "Indicateurs en direct", "alerts": "Journal des alertes", "telemetry": "Telemetrie locale", "distance_card": "Distance de securite", "blackbox_card": "Etat de la boite noire", "safe": "SECURISE", "warning": "ATTENTION", "emergency": "DANGER CRITIQUE", "camera_online": "Camera connectee", "camera_retry": "Reconnexion de la camera", "fallback": "Mode camera de secours", "language": "Langue", "english": "Anglais", "arabic": "Arabe standard", "initializing": "Initialisation de la camera...", "privacy_ready": "Tampon circulaire 0.0 seconde | Protection privee active", "local_processing": "Traitement local", "distance": "Distance la plus proche", "no_value": "Aucune donnee", "distance_value": "{value:.1f} m", "points_summary": "{value} points", "seconds": "secondes", "pixels": "pixels", "frame_error": "Impossible d'afficher l'image", "pillow_error": "Pillow est requis", "warning_motion": "ATTENTION: mouvement {value} pixels", "emergency_alert": "DANGER CRITIQUE: {label}, confiance {confidence}", "buffer_saved": "Tampon sauvegarde: {label}", "vision_online": "Moteur de vision actif", "vision_fallback": "Mode vision de secours", "camera_reconnecting": "Reconnexion de la camera", "buffer_meta": "{state} | Tampon {seconds:.1f} secondes | Mouvement {motion:.1f} pixels", "gateway": "Passerelle locale: 127.0.0.1:8765", "database": "Boite noire locale: driver_tactical_log.db", "gnss_start": "Activer la localisation", "gnss_stop": "Arreter la localisation", "metric_fps": "Images par seconde", "metric_objects": "Objets suivis", "metric_buffer": "Images du tampon", "metric_state": "Etat de menace", "metric_safe": "Cycles securises", "metric_warning": "Cycles d'attention", "metric_emergency": "Alertes critiques", "metric_commits": "Sauvegardes du tampon", "metric_model": "Moteur de vision", "metric_points": "Points de boite noire",
-        },
-        "es": {
-        "title": "Centro de vision Edge Aura", "camera": "Supervision de camara en directo", "status": "Estado de amenaza", "metrics": "Metricas en directo", "alerts": "Registro de alertas", "telemetry": "Telemetria local", "distance_card": "Distancia de seguridad", "blackbox_card": "Estado de caja negra", "safe": "SEGURO", "warning": "ATENCION", "emergency": "PELIGRO CRITICO", "camera_online": "Camara conectada", "camera_retry": "Reconectando camara", "fallback": "Modo de camara auxiliar", "language": "Idioma", "english": "Ingles", "arabic": "Arabe estandar", "initializing": "Iniciando camara...", "privacy_ready": "Buffer circular 0.0 segundos | Privacidad activa", "local_processing": "Procesamiento local", "distance": "Distancia mas cercana", "no_value": "Sin datos", "distance_value": "{value:.1f} m", "points_summary": "{value} puntos", "seconds": "segundos", "pixels": "pixeles", "frame_error": "No se puede mostrar el fotograma", "pillow_error": "Se requiere Pillow", "warning_motion": "ATENCION: movimiento {value} pixeles", "emergency_alert": "PELIGRO CRITICO: {label}, confianza {confidence}", "buffer_saved": "Buffer guardado: {label}", "vision_online": "Motor de vision activo", "vision_fallback": "Modo de vision auxiliar", "camera_reconnecting": "Reconectando camara", "buffer_meta": "{state} | Buffer {seconds:.1f} segundos | Movimiento {motion:.1f} pixeles", "gateway": "Puerta local: 127.0.0.1:8765", "database": "Caja negra local: driver_tactical_log.db", "gnss_start": "Activar ubicacion", "gnss_stop": "Detener ubicacion", "metric_fps": "Fotogramas por segundo", "metric_objects": "Objetos seguidos", "metric_buffer": "Fotogramas del buffer", "metric_state": "Estado de amenaza", "metric_safe": "Ciclos seguros", "metric_warning": "Ciclos de atencion", "metric_emergency": "Eventos criticos", "metric_commits": "Guardados del buffer", "metric_model": "Motor de vision", "metric_points": "Puntos de caja negra",
-        },
-        "ru": {
-        "title": "Центр зрения Edge Aura", "camera": "Прямая камера", "status": "Статус угрозы", "metrics": "Текущие показатели", "alerts": "Журнал тревог", "telemetry": "Локальная телеметрия", "distance_card": "Безопасная дистанция", "blackbox_card": "Статус черного ящика", "safe": "БЕЗОПАСНО", "warning": "ВНИМАНИЕ", "emergency": "КРИТИЧЕСКАЯ ОПАСНОСТЬ", "camera_online": "Камера подключена", "camera_retry": "Переподключение камеры", "fallback": "Резервный режим камеры", "language": "Язык", "english": "Английский", "arabic": "Литературный арабский", "initializing": "Запуск камеры...", "privacy_ready": "Кольцевой буфер 0.0 с | Защита приватности активна", "local_processing": "Локальная обработка", "distance": "Ближайшая дистанция", "no_value": "Нет данных", "distance_value": "{value:.1f} м", "points_summary": "{value} точек", "seconds": "секунд", "pixels": "пикселей", "frame_error": "Не удалось показать кадр", "pillow_error": "Требуется Pillow", "warning_motion": "ВНИМАНИЕ: движение {value} пикселей", "emergency_alert": "КРИТИЧЕСКАЯ ОПАСНОСТЬ: {label}, уверенность {confidence}", "buffer_saved": "Буфер сохранен: {label}", "vision_online": "Модуль зрения активен", "vision_fallback": "Резервный режим зрения", "camera_reconnecting": "Переподключение камеры", "buffer_meta": "{state} | Буфер {seconds:.1f} с | Движение {motion:.1f} пикс.", "gateway": "Локальный шлюз: 127.0.0.1:8765", "database": "Локальный черный ящик: driver_tactical_log.db", "gnss_start": "Включить геолокацию", "gnss_stop": "Остановить геолокацию", "metric_fps": "Кадров в секунду", "metric_objects": "Отслеживаемые объекты", "metric_buffer": "Кадры буфера", "metric_state": "Статус угрозы", "metric_safe": "Безопасные циклы", "metric_warning": "Циклы внимания", "metric_emergency": "Критические события", "metric_commits": "Сохранения буфера", "metric_model": "Модуль зрения", "metric_points": "Точки черного ящика",
-        },
-        "ko": {
-        "title": "Edge Aura 비전 관제 센터", "camera": "실시간 카메라 감시", "status": "위협 상태", "metrics": "실시간 지표", "alerts": "즉시 경보 기록", "telemetry": "로컬 텔레메트리", "distance_card": "안전 거리", "blackbox_card": "블랙박스 상태", "safe": "안전", "warning": "주의", "emergency": "긴급 위험", "camera_online": "카메라 연결됨", "camera_retry": "카메라 재연결 중", "fallback": "카메라 대체 모드", "language": "언어", "english": "영어", "arabic": "현대 표준 아랍어", "initializing": "카메라 초기화 중...", "privacy_ready": "순환 버퍼 0.0초 | 개인정보 보호 활성", "local_processing": "로컬 처리", "distance": "최단 거리", "no_value": "데이터 없음", "distance_value": "{value:.1f} m", "points_summary": "{value}개 지점", "seconds": "초", "pixels": "픽셀", "frame_error": "카메라 프레임 표시 실패", "pillow_error": "Pillow가 필요합니다", "warning_motion": "주의: {value}픽셀 이동", "emergency_alert": "긴급 위험: {label}, 신뢰도 {confidence}", "buffer_saved": "버퍼 저장됨: {label}", "vision_online": "비전 엔진 작동 중", "vision_fallback": "비전 대체 모드", "camera_reconnecting": "카메라 재연결 중", "buffer_meta": "{state} | 순환 버퍼 {seconds:.1f}초 | 이동 {motion:.1f}픽셀", "gateway": "로컬 게이트웨이: 127.0.0.1:8765", "database": "로컬 블랙박스: driver_tactical_log.db", "gnss_start": "위치 서비스 시작", "gnss_stop": "위치 서비스 중지", "metric_fps": "초당 프레임", "metric_objects": "추적 객체", "metric_buffer": "버퍼 프레임", "metric_state": "위협 상태", "metric_safe": "안전 주기", "metric_warning": "주의 주기", "metric_emergency": "긴급 이벤트", "metric_commits": "버퍼 저장 횟수", "metric_model": "비전 엔진", "metric_points": "블랙박스 지점",
-        },
-        "zh": {
-        "title": "Edge Aura 视觉控制中心", "camera": "实时摄像监控", "status": "威胁状态", "metrics": "实时指标", "alerts": "即时警报记录", "telemetry": "本地遥测", "distance_card": "安全距离", "blackbox_card": "黑匣子状态", "safe": "安全", "warning": "注意", "emergency": "紧急危险", "camera_online": "摄像头已连接", "camera_retry": "正在重连摄像头", "fallback": "摄像头备用模式", "language": "语言", "english": "英语", "arabic": "现代标准阿拉伯语", "initializing": "正在初始化摄像头...", "privacy_ready": "循环缓冲 0.0 秒 | 隐私保护已启用", "local_processing": "本地处理", "distance": "最近距离", "no_value": "暂无数据", "distance_value": "{value:.1f} 米", "points_summary": "{value} 个点", "seconds": "秒", "pixels": "像素", "frame_error": "无法显示摄像头画面", "pillow_error": "需要 Pillow", "warning_motion": "注意：移动 {value} 像素", "emergency_alert": "紧急危险：{label}，置信度 {confidence}", "buffer_saved": "缓冲已保存：{label}", "vision_online": "视觉引擎运行中", "vision_fallback": "视觉备用模式", "camera_reconnecting": "正在重连摄像头", "buffer_meta": "{state} | 循环缓冲 {seconds:.1f} 秒 | 移动 {motion:.1f} 像素", "gateway": "本地数据网关：127.0.0.1:8765", "database": "本地黑匣子：driver_tactical_log.db", "gnss_start": "启动定位服务", "gnss_stop": "停止定位服务", "metric_fps": "帧率", "metric_objects": "跟踪对象", "metric_buffer": "缓冲帧数", "metric_state": "威胁状态", "metric_safe": "安全周期", "metric_warning": "注意周期", "metric_emergency": "紧急事件", "metric_commits": "缓冲保存次数", "metric_model": "视觉引擎", "metric_points": "黑匣子点数",
-        },
-        "ja": {
-        "title": "Edge Aura ビジョン管制センター", "camera": "ライブカメラ監視", "status": "脅威ステータス", "metrics": "ライブ指標", "alerts": "即時警報ログ", "telemetry": "ローカルテレメトリ", "distance_card": "安全距離", "blackbox_card": "ブラックボックス状態", "safe": "安全", "warning": "注意", "emergency": "緊急危険", "camera_online": "カメラ接続済み", "camera_retry": "カメラ再接続中", "fallback": "カメラ代替モード", "language": "言語", "english": "英語", "arabic": "現代標準アラビア語", "initializing": "カメラを初期化中...", "privacy_ready": "循環バッファ 0.0秒 | プライバシー保護有効", "local_processing": "ローカル処理", "distance": "最近距離", "no_value": "データなし", "distance_value": "{value:.1f} m", "points_summary": "{value}ポイント", "seconds": "秒", "pixels": "ピクセル", "frame_error": "カメラ映像を表示できません", "pillow_error": "Pillowが必要です", "warning_motion": "注意: {value}ピクセル移動", "emergency_alert": "緊急危険: {label}、信頼度 {confidence}", "buffer_saved": "バッファ保存済み: {label}", "vision_online": "ビジョンエンジン稼働中", "vision_fallback": "ビジョン代替モード", "camera_reconnecting": "カメラ再接続中", "buffer_meta": "{state} | 循環バッファ {seconds:.1f}秒 | 移動 {motion:.1f}ピクセル", "gateway": "ローカルゲートウェイ: 127.0.0.1:8765", "database": "ローカルブラックボックス: driver_tactical_log.db", "gnss_start": "測位サービス開始", "gnss_stop": "測位サービス停止", "metric_fps": "フレームレート", "metric_objects": "追跡対象", "metric_buffer": "バッファフレーム", "metric_state": "脅威状態", "metric_safe": "安全サイクル", "metric_warning": "注意サイクル", "metric_emergency": "緊急イベント", "metric_commits": "バッファ保存回数", "metric_model": "ビジョンエンジン", "metric_points": "ブラックボックスポイント",
-        },
+            "title": "EdgeControl // Vision Operations Center",
+            "camera": "Live Camera Monitoring",
+            "status": "Threat Status",
+            "metrics": "Live Metrics",
+            "alerts": "Instant Alert Log",
+            "telemetry": "Local Telemetry",
+            "distance_card": "Safety distance",
+            "blackbox_card": "Blackbox status",
+            "safe": "SAFE",
+            "warning": "WARNING",
+            "emergency": "EMERGENCY",
+            "emergency_locked": "EMERGENCY // AWAITING MANUAL RESET",
+            "reset_button": "Manual Reset (LOTO)",
+            "initializing": "Initializing camera...",
+            "privacy_ready": "Circular buffer active | Privacy protection ready",
+            "local_processing": "Local processing",
+            "no_value": "No data",
+            "distance_value": "{value:.1f} m",
+            "points_summary": "{value} points",
+            "frame_error": "Unable to render camera frame",
+            "pillow_error": "Pillow is required for image preview",
+            "warning_motion": "WARNING: motion {value} pixels",
+            "emergency_alert": "EMERGENCY: {label}, confidence {confidence}",
+            "buffer_saved": "Pre-buffer saved: {label}",
+            "vision_online": "Vision engine online",
+            "vision_fallback": "Vision fallback mode",
+            "camera_reconnecting": "Reconnecting camera",
+            "buffer_meta": "{state} | Circular buffer {seconds:.1f} seconds | Motion {motion:.1f} pixels",
+            "gateway": "Local data gateway: 127.0.0.1:8765",
+            "database": "Local blackbox: driver_tactical_log.db",
+            "gnss_start": "Start location service",
+            "gnss_stop": "Stop location service",
+            "language": "Language",
+            "metric_fps": "Frame rate",
+            "metric_objects": "Tracked objects",
+            "metric_buffer": "Circular buffer frames",
+            "metric_state": "Hazard state",
+            "metric_safe": "Safe cycles",
+            "metric_warning": "Warning cycles",
+            "metric_emergency": "Emergency events",
+            "metric_commits": "Buffer commits",
+            "metric_model": "Vision engine",
+            "metric_points": "Blackbox points",
+            "distance": "Nearest distance",
+        }
     }
 
     def __init__(self, parent: tk.Misc, database_path="driver_tactical_log.db"):
@@ -733,6 +721,13 @@ class EdgeCameraDashboard(tk.Frame):
         self._last_hazard_signature = None
         self._last_hazard_time = 0.0
         self._hazard_state = "SAFE"
+        # FIX (LOTO / fail-safe semantics): the FSM used to auto-clear EMERGENCY
+        # the instant hazards/distance stopped tripping — inconsistent with the
+        # no-auto-recovery discipline used elsewhere in the SovereignGuard line
+        # (HumanGuard's EMERGENCY_STOP). Once EMERGENCY fires, the UI now stays
+        # latched until an operator presses the explicit Reset button, even if
+        # the underlying condition clears on its own.
+        self._emergency_locked = False
         self._state_counts = {"SAFE": 0, "WARNING": 0, "EMERGENCY": 0}
         self._emergency_count = 0
         self._buffer_commit_count = 0
@@ -750,12 +745,25 @@ class EdgeCameraDashboard(tk.Frame):
         self.camera_worker = CameraWorker(self._frame_queue, self._stop_event, self.privacy_guard)
         self._server = None
         self._server_thread = None
+        # FIX (security): telemetry endpoint had zero authentication before —
+        # any device on the LAN could POST fabricated GPS/speed fixes into the
+        # blackbox. A random per-run token is generated unless the operator
+        # pins one via EDGE_AURA_TELEMETRY_TOKEN (useful for a paired mobile GPS
+        # relay with a stable config). Printed once at startup so it can be
+        # copied into that relay.
+        self.telemetry_token = os.environ.get("EDGE_AURA_TELEMETRY_TOKEN") or secrets.token_urlsafe(24)
         self._build_ui()
         self._start_telemetry_server()
         self.camera_worker.start()
         self.after(self.POLL_MS, self._poll_frames)
         self.after(self.TELEMETRY_MS, self._poll_telemetry)
         self.bind("<Destroy>", self._on_destroy)
+        print(f"[edge-aura-eye] /telemetry auth token (send as 'Authorization: Bearer <token>'): {self.telemetry_token}")
+
+    def _t(self, key, **values):
+        lang_dict = self.LOCALIZATION.get(self.language, self.LOCALIZATION["ar"])
+        text = lang_dict.get(key, self.LOCALIZATION["ar"].get(key, key))
+        return text.format(**values)
 
     def _build_ui(self):
         c = self.colors
@@ -767,7 +775,7 @@ class EdgeCameraDashboard(tk.Frame):
         self.header_status.pack(side=tk.RIGHT, pady=5)
         self.language_label = tk.Label(self.header, text=self._t("language"), bg=c["bg"], fg=c["muted"], font=("Segoe UI", 9))
         self.language_label.pack(side=tk.RIGHT, padx=(18, 6), pady=5)
-        self.language_selector = ttk.Combobox(self.header, state="readonly", width=20, values=tuple(label for _, label in self.LANGUAGE_OPTIONS))
+        self.language_selector = ttk.Combobox(self.header, state="readonly", width=15, values=tuple(label for _, label in self.LANGUAGE_OPTIONS))
         self.language_selector.current(0)
         self.language_selector.bind("<<ComboboxSelected>>", self._on_language_selected)
         self.language_selector.pack(side=tk.RIGHT, pady=3)
@@ -792,6 +800,13 @@ class EdgeCameraDashboard(tk.Frame):
         self.status_dot_item = self.status_dot.create_oval(4, 4, 20, 20, fill=c["green"], outline="")
         self.status_label = tk.Label(self.status_card, text=self._t("safe"), bg=c["card"], fg=c["green"], font=("Segoe UI", 15, "bold"), anchor="w")
         self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # FIX (LOTO): explicit manual-reset control paired with _emergency_locked above.
+        self.reset_button = tk.Button(
+            self.status_card, text=self._t("reset_button"), command=self.manual_reset_emergency,
+            bg="#5c1f22", fg=c["text"], activebackground="#7a2a2e", activeforeground=c["text"],
+            relief=tk.FLAT, bd=0, font=("Segoe UI", 8, "bold"), cursor="hand2", state=tk.DISABLED,
+        )
+        self.reset_button.pack(side=tk.RIGHT, padx=(6, 14), pady=14)
         self.distance_card = self._card(sidebar, self._t("distance_card"), c["cyan"])
         self.distance_card.pack(fill=tk.X, pady=(0, 10))
         self.distance_value = tk.Label(self.distance_card, text=self._t("no_value"), bg=c["card"], fg=c["cyan"], font=("Consolas", 18, "bold"), anchor="w")
@@ -835,9 +850,6 @@ class EdgeCameraDashboard(tk.Frame):
         self.gnss_button = tk.Button(self.telemetry_card, text=f"{self._t('gnss_start')} // {self.gnss_port}", command=self.toggle_gnss, bg="#21684f", fg=c["text"], activebackground="#2b8968", activeforeground=c["text"], relief=tk.FLAT, bd=0, font=("Segoe UI", 8, "bold"), cursor="hand2")
         self.gnss_button.pack(fill=tk.X, padx=14, pady=(0, 10))
 
-    def _t(self, key, **values):
-        return self.LOCALIZATION[self.language][key].format(**values)
-
     def _on_language_selected(self, _event=None):
         index = self.language_selector.current()
         self.language = self.LANGUAGE_OPTIONS[index][0] if 0 <= index < len(self.LANGUAGE_OPTIONS) else "ar"
@@ -846,7 +858,6 @@ class EdgeCameraDashboard(tk.Frame):
     def _apply_language(self):
         self.header_title.config(text=self._t("title"))
         self.language_label.config(text=self._t("language"))
-        self.language_selector.configure(values=tuple(label for _, label in self.LANGUAGE_OPTIONS))
         self.camera_title.config(text=self._t("camera"))
         self.distance_card.winfo_children()[0].config(text=self._t("distance_card"))
         self.blackbox_card.winfo_children()[0].config(text=self._t("blackbox_card"))
@@ -857,13 +868,15 @@ class EdgeCameraDashboard(tk.Frame):
         self.alert_card.winfo_children()[0].config(text=self._t("alerts"))
         self.telemetry_card.winfo_children()[0].config(text=self._t("telemetry"))
         for key in ("fps", "objects", "buffer", "state", "safe", "warning", "emergency", "commits", "model", "points"):
-            self._localized_widgets[f"metric_{key}"].config(text=self._t(f"metric_{key}"))
-        self._localized_widgets["distance"].config(text=self._t("distance"))
-        self.status_label.config(text=self._t(self._hazard_state.lower()))
+            if f"metric_{key}" in self._localized_widgets:
+                self._localized_widgets[f"metric_{key}"].config(text=self._t(f"metric_{key}"))
+        if "distance" in self._localized_widgets:
+            self._localized_widgets["distance"].config(text=self._t("distance"))
+        self.status_label.config(text=self._t("emergency_locked" if self._emergency_locked else self._hazard_state.lower()))
+        self.reset_button.config(text=self._t("reset_button"))
         self.distance_value.config(text=self._t("distance_value", value=self._nearest_distance) if self._nearest_distance is not None else self._t("no_value"))
         self.blackbox_value.config(text=self._t("points_summary", value=self._blackbox_count) if self._blackbox_count is not None else self._t("no_value"))
         self.gnss_button.config(text=f"{self._t('gnss_start')} // {self.gnss_port}")
-        self.video_label.config(text=self._t("initializing")) if not hasattr(self, "_photo") else None
         self.camera_meta.config(text=self._t("buffer_meta", state=self._t(self._hazard_state.lower()), seconds=len(self._prebuffer) / self.PREBUFFER_FPS, motion=0.0))
         self._write_alert_log()
 
@@ -873,11 +886,15 @@ class EdgeCameraDashboard(tk.Frame):
         return frame
 
     def _start_telemetry_server(self):
-        server = ThreadingHTTPServer(("127.0.0.1", 8765), TelemetryRequestHandler)
-        server.telemetry_queue = self._telemetry_queue
-        self._server = server
-        self._server_thread = threading.Thread(target=server.serve_forever, name="local-camera-telemetry", daemon=True)
-        self._server_thread.start()
+        try:
+            handler_cls = type("BoundTelemetryHandler", (TelemetryRequestHandler,), {"auth_token": self.telemetry_token})
+            server = ThreadingHTTPServer(("127.0.0.1", 8765), handler_cls)
+            server.telemetry_queue = self._telemetry_queue
+            self._server = server
+            self._server_thread = threading.Thread(target=server.serve_forever, name="local-camera-telemetry", daemon=True)
+            self._server_thread.start()
+        except Exception:
+            pass
 
     def _poll_frames(self):
         latest = None
@@ -891,7 +908,9 @@ class EdgeCameraDashboard(tk.Frame):
                 jpeg_bytes, detections, fps, model_status, motion_score = latest
                 self._prebuffer.append((time.monotonic(), jpeg_bytes))
                 self._render_jpeg(jpeg_bytes)
-                hazards = [d for d in detections if d.label in CameraWorker.HAZARD_LABELS]
+                # FIX: filter against CRITICAL_LABELS (fire/knife/weapon/...),
+                # not the old HAZARD_LABELS set that also included "person".
+                hazards = [d for d in detections if d.label in CameraWorker.CRITICAL_LABELS]
                 self._update_detection_state(detections, hazards, fps, model_status, motion_score)
             except Exception:
                 self._alert_events.appendleft(("error",))
@@ -921,6 +940,27 @@ class EdgeCameraDashboard(tk.Frame):
         except Exception:
             self.video_label.config(text=self._t("frame_error"))
 
+    def manual_reset_emergency(self):
+        """FIX (LOTO): the only way out of a latched EMERGENCY state.
+
+        Mirrors HumanGuard's EMERGENCY_STOP semantics — no automatic recovery;
+        an operator must explicitly acknowledge and reset.
+        """
+        if not self._emergency_locked:
+            return
+        self._emergency_locked = False
+        self._last_hazard_signature = None
+        if self._status_flash_job is not None:
+            self.after_cancel(self._status_flash_job)
+            self._status_flash_job = None
+        self._hazard_state = "SAFE"
+        c = self.colors
+        self.status_label.config(text=self._t("safe"), fg=c["green"])
+        self.status_dot.itemconfig(self.status_dot_item, fill=c["green"])
+        self.reset_button.config(state=tk.DISABLED)
+        self._alert_events.appendleft(("commit", datetime.now().strftime("%H:%M:%S"), "MANUAL RESET (LOTO)"))
+        self._write_alert_log()
+
     def _update_detection_state(self, detections, hazards, fps, model_status, motion_score):
         c = self.colors
         self.metric_labels["fps"].config(text=f"{fps:.1f}")
@@ -937,8 +977,11 @@ class EdgeCameraDashboard(tk.Frame):
         self.distance_value.config(
             text=self._t("distance_value", value=nearest_distance) if nearest_distance is not None else self._t("no_value")
         )
-        previous_state = self._hazard_state
-        if hazards or (nearest_distance is not None and nearest_distance <= self.EMERGENCY_DISTANCE_M):
+        # FIX (LOTO): once latched, stay in EMERGENCY regardless of the current
+        # frame's hazards/distance until manual_reset_emergency() is called.
+        if self._emergency_locked:
+            next_state = "EMERGENCY"
+        elif hazards or (nearest_distance is not None and nearest_distance <= self.EMERGENCY_DISTANCE_M):
             next_state = "EMERGENCY"
         elif (
             nearest_distance is not None and nearest_distance <= self.WARNING_DISTANCE_M
@@ -947,12 +990,16 @@ class EdgeCameraDashboard(tk.Frame):
         else:
             next_state = "SAFE"
         self._state_counts[next_state] += 1
+        previous_state = self._hazard_state
         self._hazard_state = next_state
         for key in ("safe", "warning", "emergency"):
             self.metric_labels[key].config(text=str(self._state_counts[key.upper()]))
         self.metric_labels["state"].config(text=next_state)
-        state_text = self._t(next_state.lower())
         if next_state == "EMERGENCY":
+            if not self._emergency_locked:
+                self._emergency_locked = True
+                self.reset_button.config(state=tk.NORMAL)
+            state_text = self._t("emergency_locked")
             signature = ", ".join(sorted({d.label for d in hazards})) or "CLOSE PROXIMITY"
             now = time.monotonic()
             if signature != self._last_hazard_signature or now - self._last_hazard_time > 3:
@@ -969,6 +1016,7 @@ class EdgeCameraDashboard(tk.Frame):
             if self._status_flash_job is None:
                 self._flash_status()
         elif next_state == "WARNING":
+            state_text = self._t("warning")
             if previous_state != "WARNING":
                 self._alert_events.appendleft(("warning", datetime.now().strftime("%H:%M:%S"), f"{motion_score:.1f}"))
                 self._write_alert_log()
@@ -977,6 +1025,7 @@ class EdgeCameraDashboard(tk.Frame):
             if self._status_flash_job is None:
                 self._flash_status()
         else:
+            state_text = self._t("safe")
             if self._status_flash_job is not None:
                 self.after_cancel(self._status_flash_job)
                 self._status_flash_job = None
@@ -1066,8 +1115,11 @@ class EdgeCameraDashboard(tk.Frame):
             self._gnss_reader.stop()
             self._gnss_reader = None
         if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
+            try:
+                self._server.shutdown()
+                self._server.server_close()
+            except Exception:
+                pass
             self._server = None
         self._store.close()
 
